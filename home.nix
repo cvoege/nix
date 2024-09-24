@@ -49,6 +49,28 @@ in
     #   echo "Hello, ${config.home.username}!"
     # '')
 
+    pkgs.python311
+    pkgs.bash-completion
+    pkgs.fd
+    pkgs.gnugrep
+    pkgs.gnused
+    pkgs.gnutar
+    pkgs.htop
+    pkgs.jq
+    pkgs.just
+    pkgs.nix-direnv
+    pkgs.nix-bash-completions
+    pkgs.nix-index
+    pkgs.nix-info
+    pkgs.nixpkgs-fmt
+    pkgs.nodejs_20
+    pkgs.openssh
+    pkgs.postgresql
+    pkgs.shellcheck
+    pkgs.unzip
+    pkgs.wget
+    pkgs.which
+    pkgs.zip
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -95,6 +117,28 @@ in
 
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
+
+  programs.tmux = {
+    enable = true;
+    tmuxp.enable = true;
+    historyLimit = 500000;
+    shortcut = "j";
+    extraConfig = ''
+      # ijkl arrow key style pane selection
+      bind -n M-j select-pane -L
+      bind -n M-i select-pane -U
+      bind -n M-k select-pane -D
+      bind -n M-l select-pane -R
+
+      # split panes using | and -
+      bind | split-window -h
+      bind - split-window -v
+      unbind '"'
+      unbind %
+
+      set-option -g mouse off
+    '';
+  };
 
   programs.bash = {
     enable = true;
@@ -171,6 +215,9 @@ in
       }
     '';
   };
+
+  programs.htop.enable = true;
+  programs.dircolors.enable = true;
 
   programs.git = {
     enable = true;
