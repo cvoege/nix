@@ -12,14 +12,14 @@ let
   firstName = "Colton";
   lastName = "Voege";
   nameHint = "V as in Victor";
-  home = builtins.getEnv "HOME";
+  homePath = builtins.getEnv "HOME";
   username = builtins.getEnv "USER";
 in
 {
   # Home Manager needs a bit of information about you and the paths it should
   # manage.
   home.username = username;
-  home.homeDirectory = home;
+  home.homeDirectory = homePath;
 
   # This value determines the Home Manager release that your configuration is
   # compatible with. This helps avoid breakage when a new Home Manager release
@@ -49,6 +49,8 @@ in
     # (pkgs.writeShellScriptBin "my-hello" ''
     #   echo "Hello, ${config.home.username}!"
     # '')
+
+    pkgs.git
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -90,6 +92,7 @@ in
       LESS = "-iR";
       BASH_SILENCE_DEPRECATION_WARNING = "1";
       USE_GKE_GCLOUD_AUTH_PLUGIN = "True";
+      DO_NOT_TRACK = "1";
   };
 
   # Let Home Manager install and manage itself.
@@ -98,5 +101,76 @@ in
   programs.bash = {
     enable = true;
     inherit (config.home) sessionVariables;
+
+    historyFileSize = -1;
+    historySize = -1;
+    shellAliases = {
+      ls = "ls --color=auto";
+      l = "exa -alFT -L 1";
+      ll = "ls -ahlFG";
+      dev = "${homePath}/Users/colton/code/beacons/dev.sh";
+    };
+
+    initExtra = ''
+      shopt -s histappend
+      set +h
+
+      export DO_NOT_TRACK=1
+
+      # add local scripts to path
+      export PATH="$PATH:$HOME/.bin/:$HOME/.local/bin"
+
+    '' + (if isDarwin then ''
+      [[ -f /opt/homebrew/bin/brew ]] && eval "$(/opt/homebrew/bin/brew shellenv)"
+      [[ -d /Applications/Docker.app/Contents/Resources/bin/ ]] && export PATH="$PATH:/Applications/Docker.app/Contents/Resources/bin/"
+      alias o=open
+    '' else ''
+      alias o=xdg-open
+    '') + ''
+      export NIX_HOME_PATH="$HOME/.config/home-manager"
+      ehome() { code "$NIX_HOME_PATH/home.nix" ; }
+
+      codedir() { EDITOR="code --wait" , vidir "$@"; }
+
+      # bash completions
+      source ~/.nix-profile/etc/profile.d/bash_completion.sh
+      source ~/.nix-profile/share/bash-completion/completions/git
+      source ~/.nix-profile/share/bash-completion/completions/ssh
+
+      if test -f ~/google-cloud-sdk/completion.bash.inc ; then
+        source ~/google-cloud-sdk/completion.bash.inc
+      fi
+      if test -f ~/google-cloud-sdk/path.bash.inc ; then
+        source ~/google-cloud-sdk/path.bash.inc
+      fi
+      if test -d ~/google-cloud-sdk/bin/ ; then
+        export PATH="$PATH:$HOME/google-cloud-sdk/bin/"
+      fi
+
+      # ex:
+      #   gu - commits with message guh
+      #   gu a message here - commits with message "a message here"
+      gu() {
+        MSG="guh"
+        if [ $# -gt 0 ] ; then
+          MSG="$@"
+        fi
+        git add -A
+        git commit -nm "$MSG"
+      }
+
+      # ex:
+      #   guh - commits and pushes with message guh
+      #   guh a message here - commits and pushes with message "a message here"
+      guh() {
+        MSG="guh"
+        if [ $# -gt 0 ] ; then
+          MSG="$@"
+        fi
+        git add -A
+        git commit -nm "$MSG"
+        git put
+      }
+    '';
   };
 }
