@@ -71,6 +71,7 @@ in
     pkgs.wget
     pkgs.which
     pkgs.zip
+    pkgs.devenv
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -117,6 +118,36 @@ in
 
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
+
+  programs.direnv = {
+    enable = true;
+    nix-direnv.enable = true;
+  };
+
+  programs.starship.enable = true;
+  programs.starship.settings = {
+    add_newline = false;
+    character = rec {
+      success_symbol = "[${successPromptChar}](bright-green)";
+      error_symbol = "[${errorPromptChar}](bright-red)";
+    };
+    directory.style = "fg:#d442f5";
+    nix_shell = {
+      pure_msg = "";
+      impure_msg = "";
+      format = "via [$symbol$state]($style) ";
+    };
+    kubernetes = {
+      disabled = true;
+      style = "fg:#326ce5";
+    };
+
+    # disabled plugins
+    aws.disabled = true;
+    cmd_duration.disabled = true;
+    gcloud.disabled = true;
+    package.disabled = true;
+  };
 
   programs.tmux = {
     enable = true;
