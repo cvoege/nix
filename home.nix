@@ -7,7 +7,6 @@ let
   errorPromptChar = "👀";
 
 
-  personalEmail = "cvoege+nix@gmail.com";
   workEmail = "colton@beacons.ai";
   firstName = "Colton";
   lastName = "Voege";
@@ -50,7 +49,6 @@ in
     #   echo "Hello, ${config.home.username}!"
     # '')
 
-    pkgs.git
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -172,5 +170,54 @@ in
         git put
       }
     '';
+  };
+
+  programs.git = {
+    enable = true;
+    package = pkgs.gitAndTools.gitFull;
+    userName = "${firstName} ${lastName}";
+    userEmail = workEmail;
+    lfs = {
+      enable = true;
+    };
+    aliases = {
+      co = "checkout";
+      dad = "add";
+      cam = "commit -am";
+      ca = "commit -a";
+      cm = "commit -m";
+      st = "status";
+      br = "branch -v";
+      ff = "merge --ff-only";
+      branch-name = "!git rev-parse --abbrev-ref HEAD";
+      # Push current branch
+      put = "!git push origin $(git branch-name)";
+      # Pull without merging
+      get = "!git pull origin $(git branch-name)";
+      # Pull Master without switching branches
+      got =
+        "!f() { CURRENT_BRANCH=$(git branch-name) && git checkout $1 && git pull origin $1 --ff-only && git checkout $CURRENT_BRANCH;  }; f";
+      lol = "log --graph --decorate --pretty=oneline --abbrev-commit";
+      lola = "log --graph --decorate --pretty=oneline --abbrev-commit --all";
+
+      # delete local branch and pull from remote
+      fetchout =
+        "!f() { git co main; git branch -D $@; git fetch && git co $@; }; f";
+      pufl = "!git push origin $(git branch-name) --force-with-lease";
+      putf = "put --force-with-lease";
+      shake = "remote prune origin";
+    };
+    extraConfig = {
+      color.ui = true;
+      push.default = "simple";
+      pull.ff = "only";
+      init = {
+        defaultBranch = "main";
+      };
+      advice.addEmptyPathspec = false;
+      core = {
+        editor = "code --wait";
+      };
+    };
   };
 }
