@@ -181,7 +181,7 @@ in
       ls = "ls --color=auto";
       l = "exa -alFT -L 1";
       ll = "ls -ahlFG";
-      dev = "${homePath}/Users/colton/code/beacons/dev.sh";
+      dev = "${homePath}/code/beacons/dev.sh";
     };
 
     initExtra = ''
