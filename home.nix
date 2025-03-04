@@ -295,7 +295,7 @@ in
 
       # delete local branch and pull from remote
       fetchout =
-        "!f() { git co main; git branch -D $@; git fetch && git co $@; }; f";
+        "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 }; f";
       pufl = "!git push origin $(git branch-name) --force-with-lease";
       putf = "put --force-with-lease";
       shake = "remote prune origin";
