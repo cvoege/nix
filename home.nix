@@ -58,12 +58,14 @@ in
     pkgs.htop
     pkgs.jq
     pkgs.just
+    pkgs.coreutils
     pkgs.nix-direnv
     pkgs.nix-bash-completions
     pkgs.nix-index
     pkgs.nix-info
     pkgs.nixpkgs-fmt
-    pkgs.nodejs_20
+    pkgs.nodejs_22
+    pkgs.ncdu
     pkgs.openssh
     pkgs.postgresql
     pkgs.shellcheck
@@ -71,7 +73,7 @@ in
     pkgs.wget
     pkgs.which
     pkgs.zip
-    pkgs.devenv
+    # pkgs.devenv
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -182,6 +184,15 @@ in
       l = "exa -alFT -L 1";
       ll = "ls -ahlFG";
       dev = "${homePath}/code/beacons/dev.sh";
+
+      d = "docker";
+      da = "docker ps -a";
+      di = "docker images";
+      de = "docker exec -it";
+      dr = "docker run --rm -it";
+      daq = "docker ps -aq";
+      drma = "docker stop $(docker ps -aq) && docker rm -f $(docker ps -aq)";
+      dc = "docker-compose";
     };
 
     initExtra = ''
@@ -219,6 +230,10 @@ in
       if test -d ~/google-cloud-sdk/bin/ ; then
         export PATH="$PATH:$HOME/google-cloud-sdk/bin/"
       fi
+
+      fixcursor() {
+        tput cnorm
+      }
 
       # ex:
       #   gu - commits with message guh
@@ -274,7 +289,7 @@ in
       get = "!git pull origin $(git branch-name)";
       # Pull Master without switching branches
       got =
-        "!f() { CURRENT_BRANCH=$(git branch-name) && git checkout $1 && git pull origin $1 --ff-only && git checkout $CURRENT_BRANCH;  }; f";
+        "!f() { git fetch origin $1:$1  }; f";
       lol = "log --graph --decorate --pretty=oneline --abbrev-commit";
       lola = "log --graph --decorate --pretty=oneline --abbrev-commit --all";
 
