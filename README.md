@@ -34,3 +34,13 @@ git clone git@github.com:cvoege/nix.git .
 home-manager switch
 nix-env -iA devenv -f https://github.com/NixOS/nixpkgs/tarball/nixpkgs-unstable
 ```
+
+# Update
+
+```bash
+sudo nix-channel --update
+# See https://nix-community.github.io/home-manager/#sec-install-standalone for tar.gz
+nix-channel --add https://github.com/nix-community/home-manager/archive/master.tar.gz home-manager
+nix-channel --update
+nix-shell '<home-manager>' -A install
+```

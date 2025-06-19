@@ -73,6 +73,7 @@ in
     pkgs.wget
     pkgs.which
     pkgs.zip
+    pkgs.codex
     # pkgs.devenv
   ];
 
