@@ -289,13 +289,13 @@ in
       get = "!git pull origin $(git branch-name)";
       # Pull Master without switching branches
       got =
-        "!f() { git fetch origin $1:$1  }; f";
+        "!f() { git fetch origin $1:$1 ; }; f";
       lol = "log --graph --decorate --pretty=oneline --abbrev-commit";
       lola = "log --graph --decorate --pretty=oneline --abbrev-commit --all";
 
       # delete local branch and pull from remote
       fetchout =
-        "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 }; f";
+        "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 ; }; f";
       pufl = "!git push origin $(git branch-name) --force-with-lease";
       putf = "put --force-with-lease";
       shake = "remote prune origin";
