@@ -213,9 +213,9 @@ in
       alias o=xdg-open
     '') + ''
       export NIX_HOME_PATH="$HOME/.config/home-manager"
-      ehome() { code "$NIX_HOME_PATH/home.nix" ; }
+      ehome() { zed "$NIX_HOME_PATH/home.nix" ; }
 
-      codedir() { EDITOR="code --wait" , vidir "$@"; }
+      codedir() { EDITOR="zed --wait" , vidir "$@"; }
 
       # bash completions
       source ~/.nix-profile/etc/profile.d/bash_completion.sh
@@ -310,7 +310,7 @@ in
       };
       advice.addEmptyPathspec = false;
       core = {
-        editor = "code --wait";
+        editor = "zed --wait";
       };
     };
   };
