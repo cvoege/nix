@@ -74,7 +74,10 @@ in
     pkgs.which
     pkgs.zip
     pkgs.codex
-    # pkgs.devenv
+    # pkgs.bun
+    pkgs.devenv
+    pkgs.claude-code
+    pkgs.opentofu
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -311,6 +314,7 @@ in
       advice.addEmptyPathspec = false;
       core = {
         editor = "zed --wait";
+        ignoreCase = false;
       };
     };
   };
