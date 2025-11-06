@@ -49,7 +49,7 @@ in
     #   echo "Hello, ${config.home.username}!"
     # '')
 
-    pkgs.python311
+    pkgs.python313
     pkgs.bash-completion
     pkgs.fd
     pkgs.gnugrep
@@ -65,6 +65,7 @@ in
     pkgs.nix-info
     pkgs.nixpkgs-fmt
     pkgs.nodejs_22
+    pkgs.yarn
     pkgs.ncdu
     pkgs.openssh
     pkgs.postgresql
@@ -74,7 +75,7 @@ in
     pkgs.which
     pkgs.zip
     pkgs.codex
-    # pkgs.bun
+    # pkgs.ruby
     pkgs.devenv
     pkgs.claude-code
     pkgs.opentofu
@@ -210,6 +211,12 @@ in
 
     '' + (if isDarwin then ''
       [[ -f /opt/homebrew/bin/brew ]] && eval "$(/opt/homebrew/bin/brew shellenv)"
+      # export PATH="/opt/homebrew/opt/ruby/bin:$PATH"
+      # export GEM_HOME=/usr/local/opt/ruby/lib/ruby/gems/3.4.0
+      # export GEM_PATH=/usr/local/opt/ruby/lib/ruby/gems/3.4.0
+      # [[ -f /Users/$USER/.local/bin/mise ]] && eval "$(/Users/$USER/.local/bin/mise activate bash)"
+      # [[ -f /Users/$USER/.local/bin/mise ]] && eval "$(/Users/$USER/.local/bin/mise activate --shims)"
+      export PATH="/Users/$USER/.local/share/mise/shims:$PATH"
       [[ -d /Applications/Docker.app/Contents/Resources/bin/ ]] && export PATH="$PATH:/Applications/Docker.app/Contents/Resources/bin/"
       alias o=open
     '' else ''
@@ -231,8 +238,8 @@ in
       if test -f ~/google-cloud-sdk/path.bash.inc ; then
         source ~/google-cloud-sdk/path.bash.inc
       fi
-      if test -d ~/google-cloud-sdk/bin/ ; then
-        export PATH="$PATH:$HOME/google-cloud-sdk/bin/"
+      if test -d ~/code/gcloud-cli/google-cloud-sdk/bin/ ; then
+        export PATH="$PATH:$HOME/code/gcloud-cli/google-cloud-sdk/bin/"
       fi
 
       fixcursor() {
