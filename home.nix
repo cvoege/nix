@@ -286,7 +286,7 @@ in
     settings = {
       user.name = "${firstName} ${lastName}";
       user.email = workEmail;
-      aliases = {
+      alias = {
         co = "checkout";
         dad = "add";
         cam = "commit -am";
