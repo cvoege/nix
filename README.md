@@ -12,9 +12,7 @@ sh <(curl -L https://nixos.org/nix/install)
 
 # Pinned channels, preferred rn
 # See: https://status.nixos.org/
-# nix-channel --add https://nixos.org/channelsa/nixos-24.11 nixpkgs
-# nix-channel --add nixpkgs https://nixos.org/channels/nixpkgs-24.11 nixpkgs
-nix-channel --add https://github.com/nix-community/home-manager/archive/release-24.11.tar.gz home-manager
+nix-channel --add https://github.com/nix-community/home-manager/archive/master.tar.gz home-manager
 nix-channel --update
 nix-shell '<home-manager>' -A install
 

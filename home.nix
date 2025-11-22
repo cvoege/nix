@@ -7,7 +7,7 @@ let
   errorPromptChar = "👀";
 
 
-  workEmail = "colton@beacons.ai";
+  workEmail = "colton@defakto.security";
   firstName = "Colton";
   lastName = "Voege";
   nameHint = "V as in Victor";
@@ -77,7 +77,7 @@ in
     pkgs.codex
     # pkgs.ruby
     pkgs.devenv
-    pkgs.claude-code
+    # pkgs.claude-code
     pkgs.opentofu
   ];
 
@@ -278,40 +278,42 @@ in
 
   programs.git = {
     enable = true;
-    package = pkgs.gitAndTools.gitFull;
-    userName = "${firstName} ${lastName}";
-    userEmail = workEmail;
+    package = pkgs.gitFull;
+
     lfs = {
       enable = true;
     };
-    aliases = {
-      co = "checkout";
-      dad = "add";
-      cam = "commit -am";
-      ca = "commit -a";
-      cm = "commit -m";
-      st = "status";
-      br = "branch -v";
-      ff = "merge --ff-only";
-      branch-name = "!git rev-parse --abbrev-ref HEAD";
-      # Push current branch
-      put = "!git push origin $(git branch-name)";
-      # Pull without merging
-      get = "!git pull origin $(git branch-name)";
-      # Pull Master without switching branches
-      got =
-        "!f() { git fetch origin $1:$1 ; }; f";
-      lol = "log --graph --decorate --pretty=oneline --abbrev-commit";
-      lola = "log --graph --decorate --pretty=oneline --abbrev-commit --all";
+    settings = {
+      user.name = "${firstName} ${lastName}";
+      user.email = workEmail;
+      aliases = {
+        co = "checkout";
+        dad = "add";
+        cam = "commit -am";
+        ca = "commit -a";
+        cm = "commit -m";
+        st = "status";
+        br = "branch -v";
+        ff = "merge --ff-only";
+        branch-name = "!git rev-parse --abbrev-ref HEAD";
+        # Push current branch
+        put = "!git push origin $(git branch-name)";
+        # Pull without merging
+        get = "!git pull origin $(git branch-name)";
+        # Pull Master without switching branches
+        got =
+          "!f() { git fetch origin $1:$1 ; }; f";
+        lol = "log --graph --decorate --pretty=oneline --abbrev-commit";
+        lola = "log --graph --decorate --pretty=oneline --abbrev-commit --all";
 
-      # delete local branch and pull from remote
-      fetchout =
-        "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 ; }; f";
-      pufl = "!git push origin $(git branch-name) --force-with-lease";
-      putf = "put --force-with-lease";
-      shake = "remote prune origin";
-    };
-    extraConfig = {
+        # delete local branch and pull from remote
+        fetchout =
+          "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 ; }; f";
+        pufl = "!git push origin $(git branch-name) --force-with-lease";
+        putf = "put --force-with-lease";
+        shake = "remote prune origin";
+      };
+
       color.ui = true;
       push.default = "simple";
       pull.ff = "only";
