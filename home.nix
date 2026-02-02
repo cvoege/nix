@@ -7,7 +7,7 @@ let
   errorPromptChar = "👀";
 
 
-  workEmail = "colton@defakto.security";
+  workEmail = "p@colton.dev";
   firstName = "Colton";
   lastName = "Voege";
   nameHint = "V as in Victor";
