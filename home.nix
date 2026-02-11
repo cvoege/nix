@@ -220,8 +220,11 @@ in
       export PATH="/Users/$USER/.local/share/mise/shims:$PATH"
       [[ -d /Applications/Docker.app/Contents/Resources/bin/ ]] && export PATH="$PATH:/Applications/Docker.app/Contents/Resources/bin/"
       alias o=open
-      [[ -f /opt/homebrew/etc/bash_completion.d/flux ]] && source /opt/homebrew/etc/bash_completion.d/flux
-      [[ -f /opt/homebrew/etc/bash_completion.d/flux ]] && source /opt/homebrew/etc/bash_completion.d/flux
+      if [[ -d /opt/homebrew/etc/bash_completion.d ]]; then
+        for f in /opt/homebrew/etc/bash_completion.d/*; do
+          [[ -f "$f" ]] && source "$f"
+        done
+      fi
     '' else ''
       alias o=xdg-open
     '') + ''
