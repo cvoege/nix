@@ -198,6 +198,7 @@ in
       daq = "docker ps -aq";
       drma = "docker stop $(docker ps -aq) && docker rm -f $(docker ps -aq)";
       dc = "docker-compose";
+      k = "kubectl";
     };
 
     initExtra = ''
@@ -219,6 +220,8 @@ in
       export PATH="/Users/$USER/.local/share/mise/shims:$PATH"
       [[ -d /Applications/Docker.app/Contents/Resources/bin/ ]] && export PATH="$PATH:/Applications/Docker.app/Contents/Resources/bin/"
       alias o=open
+      [[ -f /opt/homebrew/etc/bash_completion.d/flux ]] && source /opt/homebrew/etc/bash_completion.d/flux
+      [[ -f /opt/homebrew/etc/bash_completion.d/flux ]] && source /opt/homebrew/etc/bash_completion.d/flux
     '' else ''
       alias o=xdg-open
     '') + ''
