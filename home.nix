@@ -248,6 +248,8 @@ in
         export PATH="$PATH:$HOME/code/gcloud-cli/google-cloud-sdk/bin/"
       fi
 
+      which kubectl && complete -F __start_kubectl k
+
       fixcursor() {
         tput cnorm
       }
