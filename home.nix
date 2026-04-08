@@ -79,6 +79,7 @@ in
     pkgs.devenv
     # pkgs.claude-code
     pkgs.opentofu
+    pkgs.bun
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -225,6 +226,7 @@ in
           [[ -f "$f" ]] && source "$f"
         done
       fi
+      export XDG_CONFIG_HOME="$HOME/.config"
     '' else ''
       alias o=xdg-open
     '') + ''
@@ -248,7 +250,8 @@ in
         export PATH="$PATH:$HOME/code/gcloud-cli/google-cloud-sdk/bin/"
       fi
 
-      which kubectl && complete -F __start_kubectl k
+      command -v kubectl > /dev/null 2>&1 && complete -F __start_kubectl k
+      command -v zed > /dev/null 2>&1 && export EDITOR="zed --wait"
 
       fixcursor() {
         tput cnorm
