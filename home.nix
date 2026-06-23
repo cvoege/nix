@@ -7,7 +7,7 @@ let
   errorPromptChar = "👀";
 
 
-  workEmail = "p@colton.dev";
+  workEmail = "colton@getaleph.com";
   firstName = "Colton";
   lastName = "Voege";
   nameHint = "V as in Victor";
@@ -64,9 +64,11 @@ in
     pkgs.nix-index
     pkgs.nix-info
     pkgs.nixpkgs-fmt
-    pkgs.nodejs_22
+    # pkgs.nodejs_24
     pkgs.yarn
     pkgs.ncdu
+    pkgs.gnupg
+    pkgs.pnpm
     pkgs.openssh
     pkgs.postgresql
     pkgs.shellcheck
@@ -74,7 +76,9 @@ in
     pkgs.wget
     pkgs.which
     pkgs.zip
-    pkgs.codex
+    # pkgs.codex
+    # pkgs.mongodb-cli
+    # pkgs.mongodb-tools
     # pkgs.ruby
     pkgs.devenv
     # pkgs.claude-code
@@ -257,6 +261,55 @@ in
         tput cnorm
       }
 
+      if test -f "$HOME/.certs/localhost-key.pem" ; then
+        export LOCALHOST_KEY="$HOME/.certs/localhost-key.pem"
+        export LOCALHOST_CERT="$HOME/.certs/localhost.pem"
+      fi
+
+      if test -d $HOME/.config/nvm ; then
+        export NVM_DIR="$HOME/.config/nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+        [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+      fi
+
+      git_main_branch() {
+        git branch -r | grep 'HEAD' | sed 's@.*-> origin/@@'
+      }
+
+      clean_rebase() {
+        parent_ref="$1"
+        git rebase --fork-point "$parent_ref" && \
+        git push origin "$(git branch-name)" --force-with-lease
+      }
+
+      clean_rebase_main() {
+        clean_rebase "$(git_main_branch)" "$1"
+      }
+
+      restack() {
+        local base_ref="$\{1:-$(git_main_branch)}"
+        git fetch origin "$base_ref" || return 1
+        git rebase --update-refs --fork-point "origin/$base_ref" || return 1
+
+        # Push every branch that is (a) part of this stack — at/above the base and
+        # at/below HEAD — and (b) out of sync with its remote. No branch list needed.
+        local head to_push="" branch local_sha remote_sha
+        head="$(git rev-parse HEAD)"
+        while read -r branch; do
+          local_sha="$(git rev-parse "refs/heads/$branch")"
+          git merge-base --is-ancestor "origin/$base_ref" "$local_sha" || continue  # above base
+          git merge-base --is-ancestor "$local_sha" "$head"            || continue  # below HEAD
+          remote_sha="$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")"
+          [ "$local_sha" != "$remote_sha" ] && to_push="$to_push $branch"
+        done < <(git for-each-ref --format='%(refname:short)' refs/heads)
+
+        if [ -n "$to_push" ]; then
+          git push --force-with-lease origin $to_push
+        else
+          echo "restack: nothing to push"
+        fi
+      }
+
       # ex:
       #   gu - commits with message guh
       #   gu a message here - commits with message "a message here"
@@ -308,7 +361,7 @@ in
         ff = "merge --ff-only";
         branch-name = "!git rev-parse --abbrev-ref HEAD";
         # Push current branch
-        put = "!git push origin $(git branch-name)";
+        put = "!git push -u origin $(git branch-name)";
         # Pull without merging
         get = "!git pull origin $(git branch-name)";
         # Pull Master without switching branches
@@ -320,8 +373,7 @@ in
         # delete local branch and pull from remote
         fetchout =
           "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 ; }; f";
-        pufl = "!git push origin $(git branch-name) --force-with-lease";
-        putf = "put --force-with-lease";
+        pufl = "!git push -u origin $(git branch-name) --force-with-lease";
         shake = "remote prune origin";
       };
 
