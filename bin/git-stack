@@ -3,6 +3,7 @@
 #
 # Subcommands:
 #   git stack                       show the stack you're currently on (a tree)
+#   git stack stacks                show every tracked stack (all trees on trunk)
 #   git stack prs                   show the stack, each branch labelled with its GitHub PR
 #   git stack prs list              flat one-branch-per-line PR list (LLM-friendly)
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
@@ -302,6 +303,55 @@ _show_subtree() { # branch parent currentBranch indent
   done < <(stack_children "$b")
 }
 
+# List every tracked stack, not just the current one. A stack is a tree rooted
+# at a branch whose parent is the trunk, so we print one tree per such root.
+# Tracked branches whose parent chain never reaches trunk (dangling parent) are
+# reported separately so they aren't silently dropped.
+cmd_stacks() {
+  local cur trunk
+  cur=$(current_branch)
+  trunk=$(stack_trunk)
+
+  local -a roots=() orphans=()
+  local b r
+  while IFS= read -r b; do
+    [[ -z "$b" ]] && continue
+    if [[ "$(stack_parent "$b")" == "$trunk" ]]; then
+      roots+=("$b")
+    else
+      # Root of $b's chain; if it doesn't resolve to a trunk-rooted branch the
+      # parent pointer dangles (e.g. parent was deleted).
+      r=$(stack_root "$b" 2>/dev/null || true)
+      [[ "$r" == ERR:* || -z "$r" ]] && orphans+=("$b")
+    fi
+  done < <(stack_tracked_branches)
+
+  if [[ ${#roots[@]} -eq 0 && ${#orphans[@]} -eq 0 ]]; then
+    info "no tracked stacks found (record one with: git stack parent <parent>)."
+    return 0
+  fi
+
+  if [[ ${#roots[@]} -gt 0 ]]; then
+    IFS=$'\n' roots=($(printf '%s\n' "${roots[@]}" | sort)); unset IFS
+    local n=${#roots[@]}
+    printf '%d stack%s on %s:\n' "$n" "$([[ $n -eq 1 ]] || echo s)" "$trunk"
+    for r in "${roots[@]}"; do
+      echo
+      echo "$trunk"
+      _show_subtree "$r" "$trunk" "$cur" ""
+    done
+  fi
+
+  if [[ ${#orphans[@]} -gt 0 ]]; then
+    echo
+    info "untracked-parent branches (parent chain doesn't reach '$trunk'):"
+    IFS=$'\n' orphans=($(printf '%s\n' "${orphans[@]}" | sort)); unset IFS
+    for b in "${orphans[@]}"; do
+      printf '  %s  (parent: %s)\n' "$b" "$(stack_parent "$b")"
+    done
+  fi
+}
+
 # Like `git stack`, but label each branch with its GitHub PR (via `gh`):
 #   [PR <n>](<url>): (+<adds>/-<dels>) <title>
 
@@ -404,6 +454,7 @@ cmd_list() {
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 case "$sub" in
   show|"")        cmd_show "$@" ;;
+  stacks|all)     cmd_stacks "$@" ;;
   prs)            cmd_prs "$@" ;;
   list)           cmd_list "$@" ;;
   checkout|co)    cmd_checkout "$@" ;;
