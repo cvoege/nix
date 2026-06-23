@@ -9,6 +9,10 @@
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
 #   git stack checkout              pick a branch in the current stack (or create a
 #                                   new one on the end) from an interactive selector
+#   git stack infer [--dry-run]     reconstruct the stack of the current branch from
+#                                   its GitHub PRs: trace each PR's base branch down
+#                                   to trunk and up to the leaves, fetch every branch,
+#                                   and record the parent pointers
 #   git stack parent [<parent>]     show, or set, the current branch's parent
 #   git stack parent --unset        stop tracking the current branch, moving its
 #                                   children onto the current branch's parent
@@ -267,6 +271,129 @@ cmd_checkout() {
   cmd_new "$name" "$leaf"
 }
 
+# Reconstruct the current branch's stack from its GitHub PRs and record the
+# parent pointers locally. Each PR's base branch is treated as that branch's
+# stack parent (the same invariant `git stack` enforces and create-pr-stack
+# relies on), so a stack of PRs trunk <- a <- b <- c is recoverable from the
+# PR base graph alone:
+#
+#   PR(a).base == trunk,  PR(b).base == a,  PR(c).base == b
+#
+# Starting from any branch in the stack we trace DOWN by following each branch's
+# PR base until we reach trunk, and UP by finding every PR whose base is a branch
+# already in the stack. Every branch found is fetched locally (created from
+# origin/<branch> if missing) and linked with `branch.<name>.stackParent`.
+cmd_infer() {
+  local dry=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1 ;;
+      -h|--help) echo "usage: git stack infer [--dry-run]"; return 0 ;;
+      *) die "usage: git stack infer [--dry-run]" ;;
+    esac
+    shift
+  done
+
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found (needed to read PRs)."
+  command -v jq >/dev/null 2>&1 || die "jq not found (needed to parse PR data)."
+
+  local cur trunk
+  cur=$(current_branch)
+  [[ -n "$cur" ]] || die "detached HEAD; checkout a branch in the stack first."
+  trunk=$(stack_trunk)
+  [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch first."
+
+  # head<TAB>base for every open PR, built once. We keep this as plain text (not
+  # an associative array) so the script stays bash-3.2 compatible like the rest
+  # of git-stack; $prs is the PR base graph and $links accumulates the inferred
+  # branch<TAB>parent edges. `base_of`/`parent_of` look up a single edge by awk.
+  info "reading open PRs from GitHub…"
+  local prs
+  prs=$(gh pr list --state open --limit 500 --json headRefName,baseRefName \
+          --jq '.[] | "\(.headRefName)\t\(.baseRefName)"') \
+    || die "failed to list PRs (is gh authenticated and an 'origin' remote set?)."
+
+  base_of() { awk -F'\t' -v h="$1" '$1==h {print $2; exit}' <<< "$prs"; }
+
+  [[ -n "$(base_of "$cur")" ]] \
+    || die "no open PR found for '$cur'; can't infer its stack (open a PR or record parents manually with 'git stack parent')."
+
+  # Trace DOWN: follow base pointers from $cur until we hit trunk, recording each
+  # branch<TAB>parent edge. $inset is a space-delimited membership set (branch
+  # names can't contain spaces, so this is unambiguous).
+  local links="" inset=" " node="$cur" guard=0
+  while :; do
+    local par; par=$(base_of "$node")
+    [[ -n "$par" ]] || die "no open PR found for '$node'; the stack trace broke below it."
+    links+="$node"$'\t'"$par"$'\n'
+    inset+="$node "
+    [[ "$par" == "$trunk" ]] && break
+    node="$par"
+    guard=$((guard + 1)); [[ $guard -gt 1000 ]] && die "cycle in PR base pointers."
+  done
+
+  # Trace UP: BFS over the PR graph for any branch whose base is already in the
+  # set. The here-string loop runs in the current shell, so updates persist.
+  local -a queue=(); read -ra queue <<< "$inset"
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    local x="${queue[0]}"; queue=("${queue[@]:1}")
+    local h b
+    while IFS=$'\t' read -r h b; do
+      [[ -n "$h" ]] || continue
+      if [[ "$b" == "$x" && "$inset" != *" $h "* ]]; then
+        inset+="$h "
+        links+="$h"$'\t'"$x"$'\n'
+        queue+=("$h")
+      fi
+    done <<< "$prs"
+  done
+
+  parent_of() { awk -F'\t' -v b="$1" '$1==b {print $2; exit}' <<< "$links"; }
+  # children_of <branch> -> branches whose recorded parent is <branch>.
+  children_of() { awk -F'\t' -v p="$1" '$2==p {print $1}' <<< "$links"; }
+
+  # Order root -> leaf (parents before children) via BFS from the single root
+  # (the branch whose parent is trunk) for stable, readable output.
+  local root; root=$(awk -F'\t' -v t="$trunk" '$2==t {print $1; exit}' <<< "$links")
+  local -a order=() bq=("$root") kid
+  while [[ ${#bq[@]} -gt 0 ]]; do
+    local cb="${bq[0]}"; bq=("${bq[@]:1}")
+    order+=("$cb")
+    while read -r kid; do
+      [[ -n "$kid" ]] && bq+=("$kid")
+    done < <(children_of "$cb")
+  done
+
+  info "inferred stack on '$trunk' (${#order[@]} branch(es)):"
+  local b
+  for b in "${order[@]}"; do
+    local mark=""; [[ "$b" == "$cur" ]] && mark=" *"
+    printf '    %s%s  (parent: %s)\n' "$b" "$mark" "$(parent_of "$b")" >&2
+  done
+
+  if [[ $dry -eq 1 ]]; then
+    info "dry run; no branches fetched and no parents recorded."
+    return 0
+  fi
+
+  info "fetching from origin…"
+  git fetch origin >/dev/null 2>&1 || die "git fetch origin failed."
+
+  for b in "${order[@]}"; do
+    if branch_exists "$b"; then
+      info "$b: already present locally"
+    elif git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null; then
+      git branch --quiet --track "$b" "origin/$b"
+      info "$b: created from origin/$b"
+    else
+      die "branch '$b' has a PR but no 'origin/$b' ref after fetch."
+    fi
+    stack_set_parent "$b" "$(parent_of "$b")"
+  done
+
+  info "done; recorded ${#order[@]} parent pointer(s). View it with: git stack"
+}
+
 cmd_trunk() {
   if [[ $# -eq 0 ]]; then stack_trunk; return 0; fi
   git config stack.trunk "$1"; info "trunk set to '$1'."
@@ -458,6 +585,7 @@ case "$sub" in
   prs)            cmd_prs "$@" ;;
   list)           cmd_list "$@" ;;
   checkout|co)    cmd_checkout "$@" ;;
+  infer)          cmd_infer "$@" ;;
   parent)         cmd_parent "$@" ;;
   new)            cmd_new "$@" ;;
   remove)         cmd_remove "$@" ;;
