@@ -27,8 +27,19 @@
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 
 set -euo pipefail
+# Source the shared lib that sits next to this script, following symlinks so it
+# works whether installed via symlink (home-manager, install.sh) or run in place.
+# Override with GIT_STACK_LIB if you keep the lib somewhere else.
+__src="${BASH_SOURCE[0]}"
+while [[ -h "$__src" ]]; do
+  __dir=$(cd -P "$(dirname "$__src")" && pwd)
+  __src=$(readlink "$__src")
+  [[ "$__src" != /* ]] && __src="$__dir/$__src"
+done
+__dir=$(cd -P "$(dirname "$__src")" && pwd)
 # shellcheck source=git-stack-lib.sh
-source "${GIT_STACK_LIB:-$HOME/.bin/git-stack-lib.sh}"
+source "${GIT_STACK_LIB:-$__dir/git-stack-lib.sh}"
+unset __src __dir
 
 cmd_parent() {
   local cur; cur=$(current_branch)

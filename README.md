@@ -1,4 +1,4 @@
-# Install
+# Install (full Nix home-manager setup)
 
 ```bash
 # Install nix
@@ -43,3 +43,18 @@ nix-channel --update
 nix-shell '<home-manager>' -A install
 home-manager switch
 ```
+
+# `git stack` (no Nix required)
+
+The PR-stacking utility in `bin/` is plain bash and works without Nix or
+home-manager. It just needs `git`, the GitHub CLI (`gh`), and `jq` on PATH.
+
+```bash
+git clone git@github.com:cvoege/nix.git
+cd nix
+./bin/install.sh            # symlinks `git stack` into ~/.local/bin
+git stack --help
+```
+
+`BINDIR=~/bin ./bin/install.sh` installs elsewhere. Home-manager users get the
+same scripts wired up automatically via `home.nix` (no install.sh needed).
