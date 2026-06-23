@@ -222,6 +222,11 @@ in
 
       export DO_NOT_TRACK=1
 
+      # Re-assert nix paths ahead of macOS path_helper, which /etc/profile runs on
+      # every login shell and which re-prepends /usr/bin, /bin, etc. to the front of
+      # PATH — burying ~/.nix-profile/bin so `bash` resolves to the old /bin/bash 3.2.
+      export PATH="$HOME/.nix-profile/bin:/etc/profiles/per-user/$USER/bin:/nix/var/nix/profiles/default/bin:$PATH"
+
       # add local scripts to path
       export PATH="$PATH:$HOME/.bin/:$HOME/.local/bin"
 
