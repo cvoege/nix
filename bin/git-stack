@@ -9,7 +9,8 @@
 #   git stack checkout              pick a branch in the current stack (or create a
 #                                   new one on the end) from an interactive selector
 #   git stack parent [<parent>]     show, or set, the current branch's parent
-#   git stack parent --unset        stop tracking the current branch
+#   git stack parent --unset        stop tracking the current branch, moving its
+#                                   children onto the current branch's parent
 #   git stack new <name> [<parent>] create a branch and record its parent
 #                                   (parent defaults to the current branch)
 #   git stack remove <name>         delete a branch and re-parent its children onto its parent
@@ -32,6 +33,15 @@ cmd_parent() {
     return 0
   fi
   if [[ "$1" == "--unset" ]]; then
+    local p; p=$(stack_parent "$cur")
+    if [[ -n "$p" ]]; then
+      local child
+      while read -r child; do
+        [[ -n "$child" ]] || continue
+        stack_set_parent "$child" "$p"
+        info "reparented '$child' onto '$p'."
+      done < <(stack_children "$cur")
+    fi
     stack_unset_parent "$cur"; info "'$cur' is no longer tracked."; return 0
   fi
   local parent="$1"
