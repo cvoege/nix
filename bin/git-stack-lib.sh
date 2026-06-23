@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# git-stack-lib.sh — shared helpers for git-stack / git-restack.
-# Sourced by the git-stack and git-restack subcommands. Not meant to be run directly.
+# git-stack-lib.sh — shared helpers for git-stack.
+# Sourced by the git-stack subcommands (including `git stack restack`). Not meant
+# to be run directly.
 #
 # Stack model: every tracked branch records its *parent branch* in git config as
 #   branch.<name>.stackParent

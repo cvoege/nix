@@ -21,9 +21,10 @@
 #   git stack remove <name>         delete a branch and re-parent its children onto its parent
 #   git stack collapse              flatten a linear stack into its root branch
 #                                   (ff-merge each branch down, push, remove the leaf)
+#   git stack restack               rebase the whole stack into one clean linear
+#                                   history (fetch, rebase bottom->top, force-push);
+#                                   --continue / --abort to resume or undo a conflict
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
-#
-# The restack operation lives in its own command: `git restack`.
 
 set -euo pipefail
 # shellcheck source=git-stack-lib.sh
@@ -154,7 +155,7 @@ cmd_collapse() {
     git checkout --quiet "$below"
     if ! git merge --ff-only "$leaf"; then
       die "cannot fast-forward '$below' to '$leaf' (branches have diverged).
-   Run 'git restack' first to linearise the stack, then retry."
+   Run 'git stack restack' first to linearise the stack, then retry."
     fi
     if [[ $push -eq 1 ]]; then
       if git rev-parse --verify --quiet "refs/remotes/origin/$below" >/dev/null; then
@@ -578,6 +579,239 @@ cmd_list() {
   done < <(stack_collect "$cur")
 }
 
+# ---- restack -------------------------------------------------------------
+# Rebase an entire branch stack into one clean linear history.
+#
+#   trunk <- a <- b <- c   (each branch recorded via `git stack parent`)
+#
+# Run from ANY branch in the stack. restack will:
+#   1. fetch, and fast-forward each branch (and trunk) to its remote when the
+#      remote is strictly ahead (adopts review fixups pushed elsewhere);
+#   2. rebase every branch onto its parent's new tip, bottom -> top, so each
+#      branch contributes only its own commits (no duplication even when a
+#      parent diverged, e.g. a review fixup a' landed on `a`);
+#   3. force-push (--force-with-lease) every branch in the stack;
+#   4. return you to the branch you started on.
+#
+# Trunk's history is never rewritten or force-pushed.
+#
+# State file ($GIT_DIR/stack-restack-state) format:
+#   ORIG_REF=<branch>
+#   PUSH=0|1
+#   OFFLINE=0|1
+#   IDX=<next plan index to process>
+#   --PLAN--
+#   <branch>\t<parent>\t<parentBaseSha>\t<branchOrigSha>
+#   ...
+# STATE and TAB are set as locals in cmd_restack; bash's dynamic scoping makes
+# them visible to the restack_* helpers it calls.
+
+restack_usage() {
+  cat >&2 <<'EOF'
+usage: git stack restack [--no-push] [--offline] [--dry-run]
+       git stack restack --continue   # resume after resolving a rebase conflict
+       git stack restack --abort      # undo: restore every branch to its pre-restack tip
+EOF
+  exit "${1:-0}"
+}
+
+restack_save_idx() {
+  local tmp="$STATE.tmp"
+  awk -v idx="$1" 'BEGIN{done=0} /^IDX=/{print "IDX=" idx; done=1; next} {print}' "$STATE" > "$tmp"
+  mv "$tmp" "$STATE"
+}
+
+restack_load_header() { # key
+  grep -m1 "^$1=" "$STATE" | cut -d= -f2-
+}
+
+restack_load_plan() { # prints plan lines (after --PLAN--)
+  sed -n '/^--PLAN--$/,$p' "$STATE" | tail -n +2
+}
+
+restack_clear_state() { rm -f "$STATE"; }
+
+# Fast-forward a local branch to its remote when the remote is strictly ahead;
+# stop hard on genuine divergence. Returns 0 if safe to proceed.
+restack_sync_one() { # branch
+  local b="$1" r local_sha remote_sha
+  r="origin/$b"
+  git rev-parse --verify --quiet "refs/remotes/$r" >/dev/null || return 0  # not on remote yet
+  local_sha=$(sha "$b"); remote_sha=$(sha "$r")
+  [[ "$local_sha" == "$remote_sha" ]] && return 0
+  if is_ancestor "$b" "$r"; then
+    git update-ref "refs/heads/$b" "$remote_sha"
+    info "fast-forwarded $b to origin/$b"
+  elif is_ancestor "$r" "$b"; then
+    return 0  # local ahead; will be pushed at the end
+  else
+    die "branch '$b' has diverged from origin/$b (both have unique commits).
+   Resolve it manually, or rerun with --offline to skip syncing."
+  fi
+}
+
+restack_build_plan() { # writes STATE; echoes nothing
+  local start trunk orig _ln branches=()
+  start=$(current_branch)
+  [[ -n "$start" ]] || die "detached HEAD; checkout a stack branch first."
+  trunk=$(stack_trunk)
+
+  while IFS= read -r _ln; do branches+=("$_ln"); done < <(stack_collect "$start" || true)
+  if [[ ${#branches[@]} -eq 0 || "${branches[0]}" == ERR:* ]]; then
+    case "${branches[0]:-}" in
+      ERR:on-trunk)  die "you're on trunk ('$trunk'); checkout a stack branch." ;;
+      ERR:no-parent:*) die "branch '${branches[0]#ERR:no-parent:}' has no parent.
+   Record one with:  git stack parent <parent-branch>" ;;
+      ERR:cycle)     die "parent pointers form a cycle." ;;
+      *) die "'$start' is not part of a tracked stack. Set its parent:  git stack parent $trunk" ;;
+    esac
+  fi
+
+  [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
+
+  orig="$start"
+
+  if [[ "$OFFLINE" == 0 ]]; then
+    info "fetching origin..."
+    git fetch --quiet origin "$trunk" "${branches[@]}" 2>/dev/null || git fetch --quiet origin || true
+    restack_sync_one "$trunk"
+    local b; for b in "${branches[@]}"; do restack_sync_one "$b"; done
+  fi
+
+  # Snapshot parent bases + each branch's original tip (post-sync, pre-rebase).
+  {
+    echo "ORIG_REF=$orig"
+    echo "PUSH=$PUSH"
+    echo "OFFLINE=$OFFLINE"
+    echo "IDX=0"
+    echo "--PLAN--"
+    local b parent base orig_sha
+    for b in "${branches[@]}"; do
+      parent=$(stack_parent "$b")
+      base=$(sha "$parent") || die "parent '$parent' of '$b' has no commit."
+      orig_sha=$(sha "$b")
+      printf '%s\t%s\t%s\t%s\n' "$b" "$parent" "$base" "$orig_sha"
+    done
+  } > "$STATE"
+}
+
+restack_run_loop() {
+  local idx n line b parent base _orig _ln
+  local -a PLAN
+  idx=$(restack_load_header IDX)
+  PLAN=()
+  while IFS= read -r _ln; do PLAN+=("$_ln"); done < <(restack_load_plan)
+  n=${#PLAN[@]}
+
+  while [[ $idx -lt $n ]]; do
+    line="${PLAN[$idx]}"
+    IFS="$TAB" read -r b parent base _orig <<<"$line"
+    info "[$((idx + 1))/$n] rebasing $b onto $parent"
+    if ! git rebase --no-update-refs --onto "$parent" "$base" "$b"; then
+      cat >&2 <<EOF
+
+git stack restack: conflict while rebasing '$b'.
+   1. resolve conflicts, then:        git rebase --continue
+   2. once that rebase finishes:       git stack restack --continue
+   (or abandon everything with:        git stack restack --abort)
+EOF
+      exit 1
+    fi
+    idx=$((idx + 1)); restack_save_idx "$idx"
+  done
+
+  restack_finish
+}
+
+restack_finish() {
+  local push offline orig
+  push=$(restack_load_header PUSH); offline=$(restack_load_header OFFLINE); orig=$(restack_load_header ORIG_REF)
+
+  if [[ "$push" == 1 && "$offline" == 0 ]]; then
+    local line b _p _b _o
+    while IFS= read -r line; do
+      IFS="$TAB" read -r b _p _b _o <<<"$line"
+      if git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null; then
+        info "pushing $b (--force-with-lease)"
+        git push --force-with-lease origin "$b"
+      else
+        info "pushing $b (new, -u)"
+        git push -u origin "$b"
+      fi
+    done < <(restack_load_plan)
+  fi
+
+  git checkout --quiet "$orig"
+  restack_clear_state
+  info "restack complete; back on '$orig'."
+}
+
+restack_do_continue() {
+  [[ -f "$STATE" ]] || die "no restack in progress."
+  if rebase_in_progress; then
+    if ! git rebase --continue; then
+      echo "git stack restack: still conflicted; resolve and rerun 'git rebase --continue'." >&2
+      exit 1
+    fi
+    # the in-progress segment just completed; advance past it.
+    restack_save_idx "$(( $(restack_load_header IDX) + 1 ))"
+  fi
+  restack_run_loop
+}
+
+restack_do_abort() {
+  [[ -f "$STATE" ]] || die "no restack in progress."
+  rebase_in_progress && git rebase --abort || true
+  local line b _p _base orig
+  while IFS= read -r line; do
+    IFS="$TAB" read -r b _p _base orig <<<"$line"
+    git update-ref "refs/heads/$b" "$orig"
+  done < <(restack_load_plan)
+  git checkout --quiet "$(restack_load_header ORIG_REF)"
+  restack_clear_state
+  info "restack aborted; all stack branches restored to their pre-restack tips."
+}
+
+restack_dry_run() {
+  local line b parent base orig
+  echo "would restack (bottom -> top):"
+  while IFS= read -r line; do
+    IFS="$TAB" read -r b parent base orig <<<"$line"
+    printf '  %-24s onto %-20s (base %.10s, tip %.10s)\n' "$b" "$parent" "$base" "$orig"
+  done < <(restack_load_plan)
+}
+
+cmd_restack() {
+  local STATE TAB
+  STATE="$(git rev-parse --git-dir)/stack-restack-state"
+  TAB=$'\t'
+
+  local PUSH=1 OFFLINE=0 ACTION="run" DRY=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push)   PUSH=0 ;;
+      --offline)   OFFLINE=1; PUSH=0 ;;
+      --dry-run)   DRY=1 ;;
+      --continue)  ACTION="continue" ;;
+      --abort)     ACTION="abort" ;;
+      -h|--help)   restack_usage 0 ;;
+      *) die "unknown option: $1 (try: git stack restack --help)" ;;
+    esac
+    shift
+  done
+
+  case "$ACTION" in
+    continue) restack_do_continue ;;
+    abort)    restack_do_abort ;;
+    run)
+      [[ -f "$STATE" ]] && die "a restack is already in progress; use --continue or --abort."
+      restack_build_plan
+      if [[ "$DRY" == 1 ]]; then restack_dry_run; restack_clear_state; exit 0; fi
+      restack_run_loop
+      ;;
+  esac
+}
+
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 case "$sub" in
   show|"")        cmd_show "$@" ;;
@@ -590,6 +824,7 @@ case "$sub" in
   new)            cmd_new "$@" ;;
   remove)         cmd_remove "$@" ;;
   collapse)       cmd_collapse "$@" ;;
+  restack)        cmd_restack "$@" ;;
   trunk)          cmd_trunk "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;

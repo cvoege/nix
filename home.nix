@@ -89,11 +89,11 @@ in
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
   # plain files is through 'home.file'.
   home.file = {
-    # PR-stacking utilities. Named git-* so they become `git stack` / `git restack`.
+    # PR-stacking utilities. Named git-* so they become `git stack` (with a
+    # `git stack restack` subcommand).
     # See ./bin/*; ~/.bin is already on PATH (set in programs.bash.initExtra).
     ".bin/git-stack-lib.sh".source = ./bin/git-stack-lib.sh;
     ".bin/git-stack" = { source = ./bin/git-stack; executable = true; };
-    ".bin/git-restack" = { source = ./bin/git-restack; executable = true; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
@@ -211,8 +211,8 @@ in
       dc = "docker-compose";
       k = "kubectl";
 
-      # PR stacking (scripts live in ./bin, exposed as `git stack` / `git restack`)
-      restack = "git restack";
+      # PR stacking (script lives in ./bin, exposed as `git stack`)
+      restack = "git stack restack";
       gstk = "git stack";
     };
 
