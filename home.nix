@@ -279,11 +279,11 @@ in
       clean_rebase() {
         parent_ref="$1"
         git rebase --fork-point "$parent_ref" && \
-        git push origin "$(git branch-name)" --force-with-lease
+        git push -u origin "$(git branch-name)" --force-with-lease
       }
 
       clean_rebase_main() {
-        clean_rebase "$(git_main_branch)" "$1"
+        clean_rebase "$(git_main_branch)"
       }
 
       restack() {
@@ -304,7 +304,7 @@ in
         done < <(git for-each-ref --format='%(refname:short)' refs/heads)
 
         if [ -n "$to_push" ]; then
-          git push --force-with-lease origin $to_push
+          git push -u --force-with-lease origin $to_push
         else
           echo "restack: nothing to push"
         fi
