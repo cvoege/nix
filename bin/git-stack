@@ -6,6 +6,8 @@
 #   git stack prs                   show the stack, each branch labelled with its GitHub PR
 #   git stack prs list              flat one-branch-per-line PR list (LLM-friendly)
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
+#   git stack checkout              pick a branch in the current stack (or create a
+#                                   new one on the end) from an interactive selector
 #   git stack parent [<parent>]     show, or set, the current branch's parent
 #   git stack parent --unset        stop tracking the current branch
 #   git stack new <name> [<parent>] create a branch and record its parent
@@ -152,6 +154,108 @@ cmd_collapse() {
   info "collapse complete; stack flattened into '${chain[0]}' on '$trunk'."
 }
 
+# Interactive arrow-key menu. First argument is the initial 0-based selection;
+# the rest are the menu items. Renders them to /dev/tty and returns the chosen
+# 0-based index on stdout. Navigate with the arrow keys (or j/k), choose with
+# Enter, cancel with q/Esc (returns non-zero).
+_select_menu() {
+  local sel="$1"; shift
+  local -a items=("$@")
+  local n=${#items[@]}
+  [[ $n -gt 0 ]] || return 1
+  [[ "$sel" -ge 0 && "$sel" -lt "$n" ]] || sel=0
+  [[ -t 0 || -e /dev/tty ]] || die "git stack checkout needs an interactive terminal."
+
+  exec 3</dev/tty
+  local i key seq oldstty
+  oldstty=$(stty -g <&3)
+  stty -echo -icanon <&3
+  # Restore the terminal no matter how we leave.
+  trap 'stty "$oldstty" <&3 2>/dev/null; exec 3<&- 2>/dev/null; printf "\033[?25h" >/dev/tty' RETURN
+  printf '\033[?25l' >/dev/tty  # hide cursor
+
+  _render_menu() {
+    for ((i = 0; i < n; i++)); do
+      if [[ $i -eq $sel ]]; then
+        printf '\033[7m> %s\033[0m\033[K\n' "${items[$i]}" >/dev/tty
+      else
+        printf '  %s\033[K\n' "${items[$i]}" >/dev/tty
+      fi
+    done
+  }
+  _render_menu
+  while :; do
+    IFS= read -rsn1 key <&3 || { echo -1; return 1; }
+    case "$key" in
+      $'\033')
+        seq=""; read -rsn2 -t 1 seq <&3 || true
+        case "$seq" in
+          '[A') (( sel > 0 ))     && sel=$((sel - 1)) ;;
+          '[B') (( sel < n - 1 )) && sel=$((sel + 1)) ;;
+          '')   echo -1; return 1 ;;   # bare Esc
+        esac ;;
+      k) (( sel > 0 ))     && sel=$((sel - 1)) ;;
+      j) (( sel < n - 1 )) && sel=$((sel + 1)) ;;
+      q) echo -1; return 1 ;;
+      '') break ;;                     # Enter
+    esac
+    printf '\033[%dA' "$n" >/dev/tty   # back to top of the list
+    _render_menu
+  done
+  echo "$sel"
+}
+
+# Show a selector of every branch in the current stack (bottom -> top, parents
+# first) plus a final entry for creating a new branch on the end of the stack.
+# Selecting a branch checks it out; selecting the new-branch entry prompts for a
+# name and creates it stacked on the stack's leaf.
+cmd_checkout() {
+  local cur trunk
+  cur=$(current_branch)
+  trunk=$(stack_trunk)
+  [[ -n "$cur" ]] || die "detached HEAD; checkout a stack branch first."
+  [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch first."
+
+  local -a branches=() labels=()
+  local b parent marker start=0
+  while IFS= read -r b; do
+    [[ -z "$b" ]] && continue
+    case "$b" in
+      ERR:on-trunk)    die "you're on trunk ('$trunk'); checkout a stack branch first." ;;
+      ERR:no-parent:*) die "branch '${b#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
+      ERR:cycle)       die "parent pointers form a cycle." ;;
+      ERR:*)           die "'$cur' is not part of a tracked stack." ;;
+    esac
+    parent=$(stack_parent "$b")
+    [[ "$b" == "$cur" ]] && { marker=" *"; start=${#branches[@]}; } || marker=""
+    branches+=("$b")
+    labels+=("$b$marker  (on $parent)")
+  done < <(stack_collect "$cur" || true)
+  [[ ${#branches[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
+
+  local leaf="${branches[$((${#branches[@]} - 1))]}"
+  labels+=("＋ new branch on '$leaf'…")
+
+  local idx
+  idx=$(_select_menu "$start" "${labels[@]}") || { info "cancelled."; return 1; }
+
+  if [[ "$idx" -lt ${#branches[@]} ]]; then
+    local target="${branches[$idx]}"
+    [[ "$target" == "$cur" ]] && { info "already on '$cur'."; return 0; }
+    git checkout "$target"
+    return 0
+  fi
+
+  # New-branch entry: prompt for a name and stack it on the leaf.
+  local name=""
+  printf 'new branch name (on %s): ' "$leaf" >/dev/tty
+  IFS= read -r name </dev/tty || true
+  name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+  [[ -n "$name" ]] || die "no branch name given."
+  branch_exists "$name" && die "branch '$name' already exists."
+  cmd_new "$name" "$leaf"
+}
+
 cmd_trunk() {
   if [[ $# -eq 0 ]]; then stack_trunk; return 0; fi
   git config stack.trunk "$1"; info "trunk set to '$1'."
@@ -292,6 +396,7 @@ case "$sub" in
   show|"")        cmd_show "$@" ;;
   prs)            cmd_prs "$@" ;;
   list)           cmd_list "$@" ;;
+  checkout|co)    cmd_checkout "$@" ;;
   parent)         cmd_parent "$@" ;;
   new)            cmd_new "$@" ;;
   remove)         cmd_remove "$@" ;;
