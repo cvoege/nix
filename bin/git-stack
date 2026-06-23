@@ -83,6 +83,8 @@ _show_subtree() { # branch parent currentBranch indent
 
 # Like `git stack`, but label each branch with its GitHub PR (via `gh`):
 #   [PR <n>](<url>): (+<adds>/-<dels>) <title>
+_PR_JSON=''  # populated once in cmd_prs, read by _show_subtree_prs
+
 cmd_prs() {
   command -v gh >/dev/null 2>&1 || die "gh CLI not found (needed for PR info)."
   local cur trunk root
@@ -93,6 +95,8 @@ cmd_prs() {
   fi
   root=$(stack_root "$cur") || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
 
+  _PR_JSON=$(gh pr list --json number,url,additions,deletions,title,headRefName --limit 200 2>/dev/null || echo '[]')
+
   _show_subtree_prs "$root" "$cur" ""
 }
 
@@ -100,13 +104,21 @@ _show_subtree_prs() { # branch currentBranch indent
   local b="$1" cur="$2" indent="$3"
   local marker line num url add del title label
   [[ "$b" == "$cur" ]] && marker="* " || marker=""
-  line=$(gh pr view "$b" --json number,url,additions,deletions,title \
-           --jq '[.number,.url,.additions,.deletions,.title]|@tsv' 2>/dev/null || true)
-  if [[ -n "$line" ]]; then
-    IFS=$'\t' read -r num url add del title <<<"$line"
+  local pr; pr=$(jq -r --arg branch "$b" \
+    '.[] | select(.headRefName == $branch)' <<< "$_PR_JSON" 2>/dev/null || true)
+  if [[ -n "$pr" ]]; then
+    num=$(jq -r '.number' <<< "$pr")
+    url=$(jq -r '.url'    <<< "$pr")
+    add=$(jq -r '.additions' <<< "$pr")
+    del=$(jq -r '.deletions' <<< "$pr")
+    title=$(jq -r '.title' <<< "$pr")
     label="[PR $num]($url): (+$add / -$del) $title"
   else
-    label="(no PR)"
+    local stat add del
+    stat=$(git diff --shortstat "$(stack_parent "$b")".."$b" 2>/dev/null || true)
+    add=$(echo "$stat" | grep -o '[0-9]* insertion' | grep -o '[0-9]*' || echo 0)
+    del=$(echo "$stat" | grep -o '[0-9]* deletion' | grep -o '[0-9]*' || echo 0)
+    label="$b (no PR): (+${add:-0} / -${del:-0})"
   fi
   if [[ -z "$indent" ]]; then
     printf '%s%s\n' "$marker" "$label"
