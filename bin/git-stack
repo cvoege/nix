@@ -4,6 +4,7 @@
 # Subcommands:
 #   git stack                       show the stack you're currently on (a tree)
 #   git stack prs                   show the stack, each branch labelled with its GitHub PR
+#   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
 #   git stack parent [<parent>]     show, or set, the current branch's parent
 #   git stack parent --unset        stop tracking the current branch
 #   git stack new <name> [<parent>] create a branch and record its parent
@@ -103,21 +104,37 @@ _show_subtree_prs() { # branch currentBranch indent
            --jq '[.number,.url,.additions,.deletions,.title]|@tsv' 2>/dev/null || true)
   if [[ -n "$line" ]]; then
     IFS=$'\t' read -r num url add del title <<<"$line"
-    label="[PR $num]($url): (+$add/-$del) $title"
+    label="[PR $num]($url): (+$add / -$del) $title"
   else
     label="(no PR)"
   fi
-  printf '%s└─ %s%s\n' "$indent" "$marker" "$label"
+  if [[ -z "$indent" ]]; then
+    printf '%s%s\n' "$marker" "$label"
+  else
+    printf '%s└─ %s%s\n' "$indent" "$marker" "$label"
+  fi
   local child
   while read -r child; do
     [[ -n "$child" ]] && _show_subtree_prs "$child" "$cur" "   $indent"
   done < <(stack_children "$b")
 }
 
+# Machine-readable: print "<branch>\t<parent>" for every branch in the current
+# stack, bottom -> top (parents before children). No network. For scripts/skills.
+cmd_list() {
+  local cur root b
+  cur=$(current_branch)
+  root=$(stack_root "$cur") || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
+  while IFS= read -r b; do
+    [[ -n "$b" ]] && printf '%s\t%s\n' "$b" "$(stack_parent "$b")"
+  done < <(stack_collect "$cur")
+}
+
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 case "$sub" in
   show|"")        cmd_show "$@" ;;
   prs)            cmd_prs "$@" ;;
+  list)           cmd_list "$@" ;;
   parent)         cmd_parent "$@" ;;
   new)            cmd_new "$@" ;;
   trunk)          cmd_trunk "$@" ;;
