@@ -276,40 +276,6 @@ in
         git branch -r | grep 'HEAD' | sed 's@.*-> origin/@@'
       }
 
-      clean_rebase() {
-        parent_ref="$1"
-        git rebase --fork-point "$parent_ref" && \
-        git push -u origin "$(git branch-name)" --force-with-lease
-      }
-
-      clean_rebase_main() {
-        clean_rebase "$(git_main_branch)"
-      }
-
-      restack() {
-        local base_ref="''${1:-$(git_main_branch)}"
-        git fetch origin "$base_ref" || return 1
-        git rebase --update-refs --fork-point "origin/$base_ref" || return 1
-
-        # Push every branch that is (a) part of this stack — at/above the base and
-        # at/below HEAD — and (b) out of sync with its remote. No branch list needed.
-        local head to_push="" branch local_sha remote_sha
-        head="$(git rev-parse HEAD)"
-        while read -r branch; do
-          local_sha="$(git rev-parse "refs/heads/$branch")"
-          git merge-base --is-ancestor "origin/$base_ref" "$local_sha" || continue  # above base
-          git merge-base --is-ancestor "$local_sha" "$head"            || continue  # below HEAD
-          remote_sha="$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")"
-          [ "$local_sha" != "$remote_sha" ] && to_push="$to_push $branch"
-        done < <(git for-each-ref --format='%(refname:short)' refs/heads)
-
-        if [ -n "$to_push" ]; then
-          git push -u --force-with-lease origin $to_push
-        else
-          echo "restack: nothing to push"
-        fi
-      }
-
       # ex:
       #   gu - commits with message guh
       #   gu a message here - commits with message "a message here"
