@@ -287,7 +287,7 @@ in
       }
 
       restack() {
-        local base_ref="$\{1:-$(git_main_branch)}"
+        local base_ref="''${1:-$(git_main_branch)}"
         git fetch origin "$base_ref" || return 1
         git rebase --update-refs --fork-point "origin/$base_ref" || return 1
 
