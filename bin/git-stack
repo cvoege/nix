@@ -4,12 +4,15 @@
 # Subcommands:
 #   git stack                       show the stack you're currently on (a tree)
 #   git stack prs                   show the stack, each branch labelled with its GitHub PR
+#   git stack prs list              flat one-branch-per-line PR list (LLM-friendly)
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
 #   git stack parent [<parent>]     show, or set, the current branch's parent
 #   git stack parent --unset        stop tracking the current branch
 #   git stack new <name> [<parent>] create a branch and record its parent
 #                                   (parent defaults to the current branch)
 #   git stack remove <name>         delete a branch and re-parent its children onto its parent
+#   git stack collapse              flatten a linear stack into its root branch
+#                                   (ff-merge each branch down, push, remove the leaf)
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 #
 # The restack operation lives in its own command: `git restack`.
@@ -65,6 +68,90 @@ cmd_remove() {
   info "deleted '$branch' (was stacked on '$parent')."
 }
 
+# Flatten an entire linear stack into its root branch (the one on trunk).
+#
+#   trunk <- a <- b <- c    becomes    trunk <- a   (a holds all the work)
+#
+# Working from the top down: check out the second-furthest branch, fast-forward
+# merge the furthest into it, push, then `git stack remove` the furthest. Repeat
+# until only the root branch (parent == trunk) remains.
+cmd_collapse() {
+  local push=1 dry=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push) push=0 ;;
+      --dry-run) dry=1 ;;
+      -h|--help) echo "usage: git stack collapse [--no-push] [--dry-run]"; return 0 ;;
+      *) die "usage: git stack collapse [--no-push] [--dry-run]" ;;
+    esac
+    shift
+  done
+
+  local cur trunk
+  cur=$(current_branch)
+  [[ -n "$cur" ]] || die "detached HEAD; checkout a stack branch first."
+  trunk=$(stack_trunk)
+  [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch."
+
+  # Collect the whole stack, root -> leaf (parents before children).
+  local -a chain=()
+  local b
+  while IFS= read -r b; do
+    [[ -z "$b" ]] && continue
+    case "$b" in
+      ERR:on-trunk)    die "you're on trunk ('$trunk'); checkout a stack branch." ;;
+      ERR:no-parent:*) die "branch '${b#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
+      ERR:cycle)       die "parent pointers form a cycle." ;;
+      ERR:*)           die "'$cur' is not part of a tracked stack." ;;
+    esac
+    chain+=("$b")
+  done < <(stack_collect "$cur" || true)
+  [[ ${#chain[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
+
+  # Collapse only makes sense on a linear stack: every non-leaf has one child.
+  local i n=${#chain[@]} kids
+  for ((i = 0; i < n - 1; i++)); do
+    kids=$(stack_children "${chain[$i]}" | grep -c . || true)
+    [[ "$kids" -le 1 ]] || die "stack is not linear: '${chain[$i]}' has multiple children; collapse only works on a linear stack."
+  done
+
+  if [[ $n -eq 1 ]]; then
+    info "stack has a single branch ('${chain[0]}'); nothing to collapse."
+    return 0
+  fi
+  [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
+
+  if [[ $dry -eq 1 ]]; then
+    echo "would collapse (top -> bottom):"
+    for ((i = n - 1; i > 0; i--)); do
+      printf '  ff-merge %-24s into %-24s, push, then remove %s\n' "${chain[$i]}" "${chain[$((i - 1))]}" "${chain[$i]}"
+    done
+    printf "  result: single branch '%s' on '%s'\n" "${chain[0]}" "$trunk"
+    return 0
+  fi
+
+  # Top -> bottom: ff the branch below up to the leaf, push it, remove the leaf.
+  for ((i = n - 1; i > 0; i--)); do
+    local leaf="${chain[$i]}" below="${chain[$((i - 1))]}"
+    info "[$((n - i))/$((n - 1))] collapsing '$leaf' into '$below'"
+    git checkout --quiet "$below"
+    if ! git merge --ff-only "$leaf"; then
+      die "cannot fast-forward '$below' to '$leaf' (branches have diverged).
+   Run 'git restack' first to linearise the stack, then retry."
+    fi
+    if [[ $push -eq 1 ]]; then
+      if git rev-parse --verify --quiet "refs/remotes/origin/$below" >/dev/null; then
+        info "pushing '$below'"; git push origin "$below"
+      else
+        info "pushing '$below' (new, -u)"; git push -u origin "$below"
+      fi
+    fi
+    cmd_remove "$leaf"
+  done
+
+  info "collapse complete; stack flattened into '${chain[0]}' on '$trunk'."
+}
+
 cmd_trunk() {
   if [[ $# -eq 0 ]]; then stack_trunk; return 0; fi
   git config stack.trunk "$1"; info "trunk set to '$1'."
@@ -105,6 +192,7 @@ _show_subtree() { # branch parent currentBranch indent
 #   [PR <n>](<url>): (+<adds>/-<dels>) <title>
 
 cmd_prs() {
+  if [[ "${1:-}" == "list" ]]; then shift; cmd_prs_list "$@"; return; fi
   command -v gh >/dev/null 2>&1 || die "gh CLI not found (needed for PR info)."
   local cur trunk root
   cur=$(current_branch)
@@ -115,6 +203,47 @@ cmd_prs() {
   root=$(stack_root "$cur") || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
 
   _show_subtree_prs "$root" "$cur" ""
+}
+
+# Like `git stack prs`, but a flat one-branch-per-line list (bottom -> top,
+# parents before children) with no tree art — easy for an LLM to parse:
+#   - <branch> [current] (parent: <parent>) — PR #<n> [<state>] (+<add>/-<del>) "<title>" <url>
+#   - <branch> (parent: <parent>) — no PR (+<add>/-<del>)
+cmd_prs_list() {
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found (needed for PR info)."
+  local cur trunk
+  cur=$(current_branch)
+  trunk=$(stack_trunk)
+  if [[ -z "$cur" || "$cur" == "$trunk" ]]; then
+    die "checkout a stack branch to view its stack (you're on '${cur:-detached HEAD}')."
+  fi
+  stack_root "$cur" >/dev/null || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
+
+  echo "trunk: $trunk"
+  local b parent marker pr num url add del title state
+  while IFS= read -r b; do
+    [[ -n "$b" ]] || continue
+    parent=$(stack_parent "$b")
+    [[ "$b" == "$cur" ]] && marker=" [current]" || marker=""
+    pr=$(gh pr view "$b" --json number,url,additions,deletions,title,state 2>/dev/null || true)
+    if [[ -n "$pr" ]]; then
+      num=$(jq -r '.number'    <<< "$pr")
+      url=$(jq -r '.url'       <<< "$pr")
+      add=$(jq -r '.additions' <<< "$pr")
+      del=$(jq -r '.deletions' <<< "$pr")
+      title=$(jq -r '.title'   <<< "$pr")
+      state=$(jq -r '.state'   <<< "$pr")
+      printf -- '- %s%s (parent: %s) — PR #%s [%s] (+%s/-%s) "%s" %s\n' \
+        "$b" "$marker" "$parent" "$num" "$state" "$add" "$del" "$title" "$url"
+    else
+      local stat
+      stat=$(git diff --shortstat "$parent".."$b" 2>/dev/null || true)
+      add=$(echo "$stat" | grep -o '[0-9]* insertion' | grep -o '[0-9]*' || echo 0)
+      del=$(echo "$stat" | grep -o '[0-9]* deletion' | grep -o '[0-9]*' || echo 0)
+      printf -- '- %s%s (parent: %s) — no PR (+%s/-%s)\n' \
+        "$b" "$marker" "$parent" "${add:-0}" "${del:-0}"
+    fi
+  done < <(stack_collect "$cur")
 }
 
 _show_subtree_prs() { # branch currentBranch indent
@@ -166,6 +295,7 @@ case "$sub" in
   parent)         cmd_parent "$@" ;;
   new)            cmd_new "$@" ;;
   remove)         cmd_remove "$@" ;;
+  collapse)       cmd_collapse "$@" ;;
   trunk)          cmd_trunk "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;
