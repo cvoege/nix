@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# git-stack — manage PR-stack metadata (parent pointers) and view the stack.
+#
+# Subcommands:
+#   git stack                       show the stack you're currently on (a tree)
+#   git stack parent [<parent>]     show, or set, the current branch's parent
+#   git stack parent --unset        stop tracking the current branch
+#   git stack new <name> [<parent>] create a branch and record its parent
+#                                   (parent defaults to the current branch)
+#   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
+#
+# The restack operation lives in its own command: `git restack`.
+
+set -euo pipefail
+# shellcheck source=git-stack-lib.sh
+source "${GIT_STACK_LIB:-$HOME/.bin/git-stack-lib.sh}"
+
+cmd_parent() {
+  local cur; cur=$(current_branch)
+  [[ -n "$cur" ]] || die "detached HEAD."
+  if [[ $# -eq 0 ]]; then
+    local p; p=$(stack_parent "$cur")
+    [[ -n "$p" ]] && echo "$p" || echo "(no parent recorded for '$cur')"
+    return 0
+  fi
+  if [[ "$1" == "--unset" ]]; then
+    stack_unset_parent "$cur"; info "'$cur' is no longer tracked."; return 0
+  fi
+  local parent="$1"
+  branch_exists "$parent" || die "no such branch: '$parent'."
+  [[ "$parent" == "$cur" ]] && die "a branch can't be its own parent."
+  stack_set_parent "$cur" "$parent"
+  info "'$cur' now stacks on '$parent'."
+}
+
+cmd_new() {
+  [[ $# -ge 1 ]] || die "usage: git stack new <name> [<parent>]"
+  local name="$1" parent="${2:-$(current_branch)}"
+  [[ -n "$parent" ]] || die "no parent given and HEAD is detached."
+  branch_exists "$parent" || die "parent branch '$parent' does not exist."
+  git checkout -b "$name"
+  stack_set_parent "$name" "$parent"
+  info "created '$name' stacked on '$parent'."
+}
+
+cmd_trunk() {
+  if [[ $# -eq 0 ]]; then stack_trunk; return 0; fi
+  git config stack.trunk "$1"; info "trunk set to '$1'."
+}
+
+# Pretty-print the tree rooted at trunk for the stack containing $cur.
+cmd_show() {
+  local cur trunk root
+  cur=$(current_branch)
+  trunk=$(stack_trunk)
+  if [[ -z "$cur" || "$cur" == "$trunk" ]]; then
+    die "checkout a stack branch to view its stack (you're on '${cur:-detached HEAD}')."
+  fi
+  root=$(stack_root "$cur") || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
+
+  echo "$trunk"
+  _show_subtree "$root" "$trunk" "$cur" ""
+}
+
+_show_subtree() { # branch parent currentBranch indent
+  local b="$1" parent="$2" cur="$3" indent="$4"
+  local ahead behind marker remote=""
+  ahead=$(ahead_count "$parent" "$b")
+  behind=$(ahead_count "$b" "$parent")
+  [[ "$b" == "$cur" ]] && marker=" *" || marker=""
+  if git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null; then
+    if [[ "$(sha "$b")" == "$(sha "origin/$b")" ]]; then remote=" [synced]"
+    else remote=" [unpushed]"; fi
+  else remote=" [local]"; fi
+  printf '%s└─ %s%s  (+%s/-%s vs %s)%s\n' "$indent" "$b" "$marker" "$ahead" "$behind" "$parent" "$remote"
+  local child
+  while read -r child; do
+    [[ -n "$child" ]] && _show_subtree "$child" "$b" "$cur" "   $indent"
+  done < <(stack_children "$b")
+}
+
+sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
+case "$sub" in
+  show|"")        cmd_show "$@" ;;
+  parent)         cmd_parent "$@" ;;
+  new)            cmd_new "$@" ;;
+  trunk)          cmd_trunk "$@" ;;
+  -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
+  *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;
+esac
