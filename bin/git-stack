@@ -9,6 +9,7 @@
 #   git stack parent --unset        stop tracking the current branch
 #   git stack new <name> [<parent>] create a branch and record its parent
 #                                   (parent defaults to the current branch)
+#   git stack remove <name>         delete a branch and re-parent its children onto its parent
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 #
 # The restack operation lives in its own command: `git restack`.
@@ -43,6 +44,25 @@ cmd_new() {
   git checkout -b "$name"
   stack_set_parent "$name" "$parent"
   info "created '$name' stacked on '$parent'."
+}
+
+cmd_remove() {
+  [[ $# -ge 1 ]] || die "usage: git stack remove <branch>"
+  local branch="$1"
+  local cur; cur=$(current_branch)
+  branch_exists "$branch" || die "no such branch: '$branch'."
+  local parent; parent=$(stack_parent "$branch")
+  [[ -n "$parent" ]] || die "'$branch' has no stack parent recorded (not a tracked stack branch)."
+  [[ "$branch" == "$cur" ]] && die "cannot remove the currently checked-out branch; switch away first."
+  local child
+  while read -r child; do
+    [[ -n "$child" ]] || continue
+    stack_set_parent "$child" "$parent"
+    info "reparented '$child' onto '$parent'."
+  done < <(stack_children "$branch")
+  stack_unset_parent "$branch"
+  git branch -D "$branch"
+  info "deleted '$branch' (was stacked on '$parent')."
 }
 
 cmd_trunk() {
@@ -149,6 +169,7 @@ case "$sub" in
   list)           cmd_list "$@" ;;
   parent)         cmd_parent "$@" ;;
   new)            cmd_new "$@" ;;
+  remove)         cmd_remove "$@" ;;
   trunk)          cmd_trunk "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;
