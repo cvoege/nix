@@ -3,7 +3,7 @@
 #
 # Subcommands:
 #   git stack                       show the stack you're currently on (a tree)
-#   git stack stacks                show every tracked stack (all trees on trunk)
+#   git stack list-stacks           show every tracked stack (all trees on trunk)
 #   git stack prs                   show the stack, each branch labelled with its GitHub PR
 #   git stack prs list              flat one-branch-per-line PR list (LLM-friendly)
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
@@ -581,7 +581,7 @@ cmd_list() {
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 case "$sub" in
   show|"")        cmd_show "$@" ;;
-  stacks|all)     cmd_stacks "$@" ;;
+  list-stacks|all) cmd_stacks "$@" ;;
   prs)            cmd_prs "$@" ;;
   list)           cmd_list "$@" ;;
   checkout|co)    cmd_checkout "$@" ;;
