@@ -29,19 +29,36 @@
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 
 set -euo pipefail
-# Source the shared lib that sits next to this script, following symlinks so it
-# works whether installed via symlink (home-manager, install.sh) or run in place.
-# Override with GIT_STACK_LIB if you keep the lib somewhere else.
-__src="${BASH_SOURCE[0]}"
-while [[ -h "$__src" ]]; do
-  __dir=$(cd -P "$(dirname "$__src")" && pwd)
-  __src=$(readlink "$__src")
-  [[ "$__src" != /* ]] && __src="$__dir/$__src"
-done
-__dir=$(cd -P "$(dirname "$__src")" && pwd)
+# Source the shared lib that sits next to this script. The lib is installed
+# alongside git-stack in the same dir (home-manager's ~/.bin, install.sh's
+# ~/.local/bin, or the repo's bin/), so we look in two places, in order:
+#   1. the dir of the script as invoked (the install dir holding both symlinks)
+#   2. the dir of the fully symlink-resolved script (the in-place / repo case)
+# We can't just resolve symlinks and look next to the target: home-manager
+# stores each file as its own content-addressed /nix/store/<hash> path, so the
+# resolved script has no sibling lib. Override with GIT_STACK_LIB if needed.
+__resolve_dir() {
+  local src="$1" dir
+  while [[ -h "$src" ]]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+__lib="${GIT_STACK_LIB:-}"
+if [[ -z "$__lib" ]]; then
+  __invoked_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  __resolved_dir=$(__resolve_dir "${BASH_SOURCE[0]}")
+  for __d in "$__invoked_dir" "$__resolved_dir"; do
+    if [[ -e "$__d/git-stack-lib.sh" ]]; then __lib="$__d/git-stack-lib.sh"; break; fi
+  done
+  : "${__lib:=$__invoked_dir/git-stack-lib.sh}"
+fi
 # shellcheck source=git-stack-lib.sh
-source "${GIT_STACK_LIB:-$__dir/git-stack-lib.sh}"
-unset __src __dir
+source "$__lib"
+unset __lib __invoked_dir __resolved_dir __d
+unset -f __resolve_dir
 
 cmd_parent() {
   local cur; cur=$(current_branch)
