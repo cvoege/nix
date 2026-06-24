@@ -106,6 +106,19 @@ stack_collect() {
   done
 }
 
+# Die with a friendly message if $1 is an ERR:* sentinel from stack_root /
+# stack_collect; a no-op otherwise. Call it from the CONSUMER side of a
+# `while read … < <(stack_collect)` loop, never the producer: die runs `exit`,
+# which terminates only the current shell, not a process-substitution subshell.
+stack_check_err() {
+  case "$1" in
+    ERR:on-trunk)    die "you're on trunk ('$(stack_trunk)'); checkout a stack branch first." ;;
+    ERR:no-parent:*) die "branch '${1#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
+    ERR:cycle)       die "parent pointers form a cycle." ;;
+    ERR:*)           die "not part of a tracked stack." ;;
+  esac
+}
+
 # ---- misc ----------------------------------------------------------------
 
 sha() { git rev-parse --verify --quiet "$1^{commit}"; }
@@ -212,12 +225,7 @@ cmd_collapse() {
   local b
   while IFS= read -r b; do
     [[ -z "$b" ]] && continue
-    case "$b" in
-      ERR:on-trunk)    die "you're on trunk ('$trunk'); checkout a stack branch." ;;
-      ERR:no-parent:*) die "branch '${b#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
-      ERR:cycle)       die "parent pointers form a cycle." ;;
-      ERR:*)           die "'$cur' is not part of a tracked stack." ;;
-    esac
+    stack_check_err "$b"
     chain+=("$b")
   done < <(stack_collect "$cur" || true)
   [[ ${#chain[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
@@ -328,12 +336,7 @@ cmd_checkout() {
   local b parent marker start=0
   while IFS= read -r b; do
     [[ -z "$b" ]] && continue
-    case "$b" in
-      ERR:on-trunk)    die "you're on trunk ('$trunk'); checkout a stack branch first." ;;
-      ERR:no-parent:*) die "branch '${b#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
-      ERR:cycle)       die "parent pointers form a cycle." ;;
-      ERR:*)           die "'$cur' is not part of a tracked stack." ;;
-    esac
+    stack_check_err "$b"
     parent=$(stack_parent "$b")
     [[ "$b" == "$cur" ]] && { marker=" *"; start=${#branches[@]}; } || marker=""
     branches+=("$b")
@@ -745,15 +748,9 @@ restack_build_plan() { # writes STATE; echoes nothing
   trunk=$(stack_trunk)
 
   while IFS= read -r _ln; do branches+=("$_ln"); done < <(stack_collect "$start" || true)
-  if [[ ${#branches[@]} -eq 0 || "${branches[0]}" == ERR:* ]]; then
-    case "${branches[0]:-}" in
-      ERR:on-trunk)  die "you're on trunk ('$trunk'); checkout a stack branch." ;;
-      ERR:no-parent:*) die "branch '${branches[0]#ERR:no-parent:}' has no parent.
-   Record one with:  git stack parent <parent-branch>" ;;
-      ERR:cycle)     die "parent pointers form a cycle." ;;
-      *) die "'$start' is not part of a tracked stack. Set its parent:  git stack parent $trunk" ;;
-    esac
-  fi
+  [[ ${#branches[@]} -gt 0 ]] \
+    || die "'$start' is not part of a tracked stack. Set its parent:  git stack parent $trunk"
+  stack_check_err "${branches[0]}"
 
   [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
 
@@ -931,12 +928,7 @@ cmd_sync() {
   local b
   while IFS= read -r b; do
     [[ -z "$b" ]] && continue
-    case "$b" in
-      ERR:on-trunk)    die "you're on trunk ('$trunk'); checkout a stack branch." ;;
-      ERR:no-parent:*) die "branch '${b#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
-      ERR:cycle)       die "parent pointers form a cycle." ;;
-      ERR:*)           die "'$cur' is not part of a tracked stack." ;;
-    esac
+    stack_check_err "$b"
     chain+=("$b")
   done < <(stack_collect "$cur" || true)
   [[ ${#chain[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
