@@ -28,7 +28,7 @@ fi
 
 # ---- link the scripts ----------------------------------------------------
 mkdir -p "$BINDIR"
-for f in git-stack git-stack-lib.sh; do
+for f in git-stack; do
   ln -sf "$SRC_DIR/$f" "$BINDIR/$f"
   echo "linked $BINDIR/$f -> $SRC_DIR/$f"
 done
