@@ -92,7 +92,6 @@ in
     # PR-stacking utilities. Named git-* so they become `git stack` (with a
     # `git stack restack` subcommand).
     # See ./bin/*; ~/.bin is already on PATH (set in programs.bash.initExtra).
-    ".bin/git-stack-lib.sh".source = ./bin/git-stack-lib.sh;
     ".bin/git-stack" = { source = ./bin/git-stack; executable = true; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
