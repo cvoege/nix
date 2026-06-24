@@ -811,7 +811,7 @@ restack_squash_branch() { # branch parent
   git checkout --quiet "$b"
   msg=$(git log --reverse --format='%B' "$ptip..$b")   # lossless: all messages, oldest first
   git reset --soft "$ptip"
-  git commit --quiet -m "$msg"
+  git commit --quiet -nm "$msg"
 }
 
 restack_build_plan() { # writes STATE; echoes nothing
