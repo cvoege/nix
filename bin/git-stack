@@ -27,6 +27,7 @@
 #                                   (ff-merge each branch down, push, remove the leaf)
 #   git stack restack               rebase the whole stack into one clean linear
 #                                   history (fetch, rebase bottom->top, force-push);
+#                                   --squash collapses each branch to one commit;
 #                                   --continue / --abort to resume or undo a conflict
 #   git stack sync                  drop merged branches from the stack (reparenting
 #                                   their children) then restack the remainder
@@ -731,6 +732,8 @@ cmd_list() {
 #   2. rebase every branch onto its parent's new tip, bottom -> top, so each
 #      branch contributes only its own commits (no duplication even when a
 #      parent diverged, e.g. a review fixup a' landed on `a`);
+#   2b. with --squash, collapse each branch to a single commit on its parent
+#      right after it is rebased (one commit == one PR, the cleanest stack);
 #   3. force-push (--force-with-lease) every branch in the stack;
 #   4. return you to the branch you started on.
 #
@@ -740,6 +743,7 @@ cmd_list() {
 #   ORIG_REF=<branch>
 #   PUSH=0|1
 #   OFFLINE=0|1
+#   SQUASH=0|1
 #   IDX=<next plan index to process>
 #   --PLAN--
 #   <branch>\t<parent>\t<parentBaseSha>\t<branchOrigSha>
@@ -749,9 +753,11 @@ cmd_list() {
 
 restack_usage() {
   cat >&2 <<'EOF'
-usage: git stack restack [--no-push] [--offline] [--dry-run]
+usage: git stack restack [--squash] [--no-push] [--offline] [--dry-run]
        git stack restack --continue   # resume after resolving a rebase conflict
        git stack restack --abort      # undo: restore every branch to its pre-restack tip
+
+  --squash   after rebasing, collapse each branch to a single commit on its parent
 EOF
   exit "${1:-0}"
 }
@@ -791,6 +797,23 @@ restack_sync_one() { # branch
   fi
 }
 
+# Collapse a branch to a single commit on top of its parent. Lossless: the new
+# commit message concatenates every squashed commit's message (oldest first).
+# `git reset --soft` + commit re-uses the existing tip tree, so it cannot
+# conflict and the branch's tree is preserved exactly (a child's later rebase
+# still replays cleanly). Idempotent: returns early when already one commit.
+restack_squash_branch() { # branch parent
+  local b="$1" parent="$2" ptip n msg
+  ptip=$(sha "$parent")
+  n=$(git rev-list --count "$ptip..$b")
+  [[ "$n" -gt 1 ]] || return 0          # already 1 (or 0) commit; nothing to do
+  info "  squashing $b ($n commits -> 1)"
+  git checkout --quiet "$b"
+  msg=$(git log --reverse --format='%B' "$ptip..$b")   # lossless: all messages, oldest first
+  git reset --soft "$ptip"
+  git commit --quiet -m "$msg"
+}
+
 restack_build_plan() { # writes STATE; echoes nothing
   local start trunk orig _ln branches=()
   start=$(current_branch)
@@ -818,6 +841,7 @@ restack_build_plan() { # writes STATE; echoes nothing
     echo "ORIG_REF=$orig"
     echo "PUSH=$PUSH"
     echo "OFFLINE=$OFFLINE"
+    echo "SQUASH=$SQUASH"
     echo "IDX=0"
     echo "--PLAN--"
     local b parent base orig_sha
@@ -831,9 +855,10 @@ restack_build_plan() { # writes STATE; echoes nothing
 }
 
 restack_run_loop() {
-  local idx n line b parent base _orig _ln
+  local idx n line b parent base _orig _ln squash
   local -a PLAN
   idx=$(restack_load_header IDX)
+  squash=$(restack_load_header SQUASH)
   PLAN=()
   while IFS= read -r _ln; do PLAN+=("$_ln"); done < <(restack_load_plan)
   n=${#PLAN[@]}
@@ -841,20 +866,20 @@ restack_run_loop() {
   while [[ $idx -lt $n ]]; do
     line="${PLAN[$idx]}"
     IFS="$TAB" read -r b parent base _orig <<<"$line"
-    # Already rebased onto its parent? Skip it. This is only ever true after the
-    # branch has landed on its (possibly rewritten) parent, so a not-yet-done
-    # branch — still on its old base — is never wrongly skipped. It keeps the
-    # loop idempotent, so --continue works whether or not the user finished the
-    # conflicted rebase by hand; re-running from the stale snapshot base would
-    # otherwise replay the parent's commits and duplicate them.
-    if is_ancestor "$parent" "$b"; then
-      info "[$((idx + 1))/$n] $b already on $parent; skipping"
-      idx=$((idx + 1)); restack_save_idx "$idx"
-      continue
-    fi
-    info "[$((idx + 1))/$n] rebasing $b onto $parent"
-    if ! git rebase --no-update-refs --onto "$parent" "$base" "$b"; then
-      cat >&2 <<EOF
+    # Rebase onto the parent's new tip unless the branch is already there. The
+    # ancestor check is only ever true after the branch has landed on its
+    # (possibly rewritten) parent, so a not-yet-done branch — still on its old
+    # base — is never wrongly skipped. It keeps the loop idempotent, so
+    # --continue works whether or not the user finished the conflicted rebase by
+    # hand; re-running from the stale snapshot base would otherwise replay the
+    # parent's commits and duplicate them. Crucially we fall THROUGH to the
+    # squash step rather than `continue`ing past it: after a conflict resolved
+    # via --continue the branch is already an ancestor of its parent, and it
+    # still needs squashing.
+    if ! is_ancestor "$parent" "$b"; then
+      info "[$((idx + 1))/$n] rebasing $b onto $parent"
+      if ! git rebase --no-update-refs --onto "$parent" "$base" "$b"; then
+        cat >&2 <<EOF
 
 git stack restack: conflict while rebasing '$b'.
    1. resolve the conflicts and stage them (git add …)
@@ -862,8 +887,12 @@ git stack restack: conflict while rebasing '$b'.
       (finishing the rebase yourself with 'git rebase --continue' first is fine too)
    (or abandon everything with: git stack restack --abort)
 EOF
-      exit 1
+        exit 1
+      fi
+    else
+      info "[$((idx + 1))/$n] $b already on $parent; skipping rebase"
     fi
+    if [[ "$squash" == 1 ]]; then restack_squash_branch "$b" "$parent"; fi
     idx=$((idx + 1)); restack_save_idx "$idx"
   done
 
@@ -915,11 +944,17 @@ restack_do_abort() {
 }
 
 restack_dry_run() {
-  local line b parent base orig
+  local line b parent base orig squash sq n
+  squash=$(restack_load_header SQUASH)
   echo "would restack (bottom -> top):"
   while IFS= read -r line; do
     IFS="$TAB" read -r b parent base orig <<<"$line"
-    printf '  %-24s onto %-20s (base %.10s, tip %.10s)\n' "$b" "$parent" "$base" "$orig"
+    sq=""
+    if [[ "$squash" == 1 ]]; then
+      n=$(git rev-list --count "$base..$b" 2>/dev/null || echo "?")
+      sq=$(printf '  (+ squash %s -> 1)' "$n")
+    fi
+    printf '  %-24s onto %-20s (base %.10s, tip %.10s)%s\n' "$b" "$parent" "$base" "$orig" "$sq"
   done < <(restack_load_plan)
 }
 
@@ -928,12 +963,13 @@ cmd_restack() {
   STATE="$(git rev-parse --git-dir)/stack-restack-state"
   TAB=$'\t'
 
-  local PUSH=1 OFFLINE=0 ACTION="run" DRY=0
+  local PUSH=1 OFFLINE=0 ACTION="run" DRY=0 SQUASH=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-push)   PUSH=0 ;;
       --offline)   OFFLINE=1; PUSH=0 ;;
       --dry-run)   DRY=1 ;;
+      --squash)    SQUASH=1 ;;
       --continue)  ACTION="continue" ;;
       --abort)     ACTION="abort" ;;
       -h|--help)   restack_usage 0 ;;
