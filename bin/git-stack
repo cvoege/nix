@@ -6,6 +6,10 @@
 #   git stack list-stacks           show every tracked stack (all trees on trunk)
 #   git stack prs                   show the stack, each branch labelled with its GitHub PR
 #   git stack prs list              flat one-branch-per-line PR list (LLM-friendly)
+#   git stack review                re-trigger the Claude GitHub bot on every PR in the
+#                                   stack: hide its stale review comments, post a fresh
+#                                   "@claude review once" (skips branches with no PR)
+#   git stack review single         same, but only the current branch (not the whole stack)
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
 #   git stack checkout              pick a branch in the current stack (or create a
 #                                   new one on the end) from an interactive selector
@@ -571,6 +575,52 @@ cmd_stacks() {
   fi
 }
 
+# Re-trigger the Claude GitHub bot on every PR in the current stack: hide the
+# bot's prior top-level review comments (mark OUTDATED) and post a fresh
+# "@claude review once". Skips branches with no PR. Idempotent re-hides.
+cmd_review() {
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found (needed for reviews)."
+  command -v jq >/dev/null 2>&1 || die "jq not found (needed for reviews)."
+  local single=0
+  if [[ "${1:-}" == "single" ]]; then single=1; shift; fi
+  local cur trunk
+  cur=$(current_branch)
+  trunk=$(stack_trunk)
+  if [[ -z "$cur" || "$cur" == "$trunk" ]]; then
+    die "checkout a stack branch to review its stack (you're on '${cur:-detached HEAD}')."
+  fi
+  stack_root "$cur" >/dev/null || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
+
+  local b pr ids id hidden
+  local -a skipped=()
+  while IFS= read -r b; do
+    [[ -n "$b" ]] || continue
+    pr=$(gh pr view "$b" --json number,comments 2>/dev/null || true)
+    if [[ -z "$pr" ]]; then
+      skipped+=("$b"); info "skip $b — no PR"; continue
+    fi
+    hidden=0
+    ids=$(jq -r '.comments[] | select(.author.login == "claude") | .id' <<< "$pr")
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      gh api graphql -f query='
+        mutation($id: ID!) {
+          minimizeComment(input: {classifier: OUTDATED, subjectId: $id}) {
+            minimizedComment { isMinimized }
+          }
+        }' -F id="$id" >/dev/null || die "failed to hide comment $id on $b"
+      hidden=$((hidden + 1))
+    done <<< "$ids"
+    gh pr comment "$b" --body "@claude review once" >/dev/null \
+      || die "failed to post review trigger on $b"
+    info "$b — hid $hidden stale claude comment(s), requested fresh review"
+  done < <(if [[ $single -eq 1 ]]; then printf '%s\n' "$cur"; else stack_collect "$cur"; fi)
+
+  if [[ ${#skipped[@]} -gt 0 ]]; then
+    info "skipped (no PR): ${skipped[*]}"
+  fi
+}
+
 # Like `git stack`, but label each branch with its GitHub PR (via `gh`):
 #   [PR <n>](<url>): (+<adds>/-<dels>) <title>
 
@@ -1045,6 +1095,7 @@ case "$sub" in
   show|"")        cmd_show "$@" ;;
   list-stacks|all) cmd_stacks "$@" ;;
   prs)            cmd_prs "$@" ;;
+  review)         cmd_review "$@" ;;
   list)           cmd_list "$@" ;;
   checkout|co)    cmd_checkout "$@" ;;
   infer)          cmd_infer "$@" ;;
