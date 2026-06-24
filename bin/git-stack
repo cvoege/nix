@@ -796,9 +796,10 @@ restack_run_loop() {
       cat >&2 <<EOF
 
 git stack restack: conflict while rebasing '$b'.
-   1. resolve conflicts, then:        git rebase --continue
-   2. once that rebase finishes:       git stack restack --continue
-   (or abandon everything with:        git stack restack --abort)
+   1. resolve the conflicts and stage them:  git add <files>
+   2. continue the restack (do NOT run git rebase --continue yourself):
+                                             git stack restack --continue
+   (or abandon everything with:              git stack restack --abort)
 EOF
       exit 1
     fi
@@ -830,7 +831,7 @@ restack_do_continue() {
   [[ -f "$STATE" ]] || die "no restack in progress."
   if rebase_in_progress; then
     if ! git rebase --continue; then
-      echo "git stack restack: still conflicted; resolve and rerun 'git rebase --continue'." >&2
+      echo "git stack restack: still conflicted; resolve, stage (git add <files>), and rerun 'git stack restack --continue'." >&2
       exit 1
     fi
     # the in-progress segment just completed; advance past it.
