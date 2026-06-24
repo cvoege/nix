@@ -254,11 +254,7 @@ cmd_collapse() {
    Run 'git stack restack' first to linearise the stack, then retry."
     fi
     if [[ $push -eq 1 ]]; then
-      if git rev-parse --verify --quiet "refs/remotes/origin/$below" >/dev/null; then
-        info "pushing '$below'"; git push origin "$below"
-      else
-        info "pushing '$below' (new, -u)"; git push -u origin "$below"
-      fi
+      info "pushing '$below'"; git push -u origin "$below"
     fi
     cmd_remove "$leaf"
   done
@@ -823,13 +819,8 @@ restack_finish() {
     local line b _p _b _o
     while IFS= read -r line; do
       IFS="$TAB" read -r b _p _b _o <<<"$line"
-      if git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null; then
-        info "pushing $b (--force-with-lease)"
-        git push --force-with-lease origin "$b"
-      else
-        info "pushing $b (new, -u)"
-        git push -u origin "$b"
-      fi
+      info "pushing $b (--force-with-lease)"
+      git push -u --force-with-lease origin "$b"
     done < <(restack_load_plan)
   fi
 
