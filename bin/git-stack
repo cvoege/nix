@@ -791,15 +791,26 @@ restack_run_loop() {
   while [[ $idx -lt $n ]]; do
     line="${PLAN[$idx]}"
     IFS="$TAB" read -r b parent base _orig <<<"$line"
+    # Already rebased onto its parent? Skip it. This is only ever true after the
+    # branch has landed on its (possibly rewritten) parent, so a not-yet-done
+    # branch — still on its old base — is never wrongly skipped. It keeps the
+    # loop idempotent, so --continue works whether or not the user finished the
+    # conflicted rebase by hand; re-running from the stale snapshot base would
+    # otherwise replay the parent's commits and duplicate them.
+    if is_ancestor "$parent" "$b"; then
+      info "[$((idx + 1))/$n] $b already on $parent; skipping"
+      idx=$((idx + 1)); restack_save_idx "$idx"
+      continue
+    fi
     info "[$((idx + 1))/$n] rebasing $b onto $parent"
     if ! git rebase --no-update-refs --onto "$parent" "$base" "$b"; then
       cat >&2 <<EOF
 
 git stack restack: conflict while rebasing '$b'.
-   1. resolve the conflicts and stage them:  git add <files>
-   2. continue the restack (do NOT run git rebase --continue yourself):
-                                             git stack restack --continue
-   (or abandon everything with:              git stack restack --abort)
+   1. resolve the conflicts and stage them (git add …)
+   2. continue:                 git stack restack --continue
+      (finishing the rebase yourself with 'git rebase --continue' first is fine too)
+   (or abandon everything with: git stack restack --abort)
 EOF
       exit 1
     fi
@@ -831,12 +842,12 @@ restack_do_continue() {
   [[ -f "$STATE" ]] || die "no restack in progress."
   if rebase_in_progress; then
     if ! git rebase --continue; then
-      echo "git stack restack: still conflicted; resolve, stage (git add <files>), and rerun 'git stack restack --continue'." >&2
+      echo "git stack restack: rebase still has conflicts; resolve them and rerun 'git stack restack --continue'." >&2
       exit 1
     fi
-    # the in-progress segment just completed; advance past it.
-    restack_save_idx "$(( $(restack_load_header IDX) + 1 ))"
   fi
+  # The loop's idempotency guard advances past any branch already rebased —
+  # whether we just finished it above or the user finished it by hand.
   restack_run_loop
 }
 
