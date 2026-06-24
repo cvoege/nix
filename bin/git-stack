@@ -24,6 +24,8 @@
 #   git stack restack               rebase the whole stack into one clean linear
 #                                   history (fetch, rebase bottom->top, force-push);
 #                                   --continue / --abort to resume or undo a conflict
+#   git stack sync                  drop merged branches from the stack (reparenting
+#                                   their children) then restack the remainder
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 
 set -euo pipefail
@@ -315,17 +317,12 @@ cmd_infer() {
   trunk=$(stack_trunk)
   [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch first."
 
-  # head<TAB>base for every open PR, built once. We keep this as plain text (not
-  # an associative array) so the script stays bash-3.2 compatible like the rest
-  # of git-stack; $prs is the PR base graph and $links accumulates the inferred
-  # branch<TAB>parent edges. `base_of`/`parent_of` look up a single edge by awk.
-  info "reading open PRs from GitHub…"
-  local prs
-  prs=$(gh pr list --state open --limit 500 --json headRefName,baseRefName \
-          --jq '.[] | "\(.headRefName)\t\(.baseRefName)"') \
-    || die "failed to list PRs (is gh authenticated and an 'origin' remote set?)."
-
-  base_of() { awk -F'\t' -v h="$1" '$1==h {print $2; exit}' <<< "$prs"; }
+  # We query PRs one branch at a time rather than listing every open PR up front:
+  # `base_of` reads a single branch's PR base, and the trace-UP step asks GitHub
+  # directly for the PRs targeting a given base. $links accumulates the inferred
+  # branch<TAB>parent edges as plain text so the script stays bash-3.2 compatible.
+  info "reading PRs from GitHub…"
+  base_of() { gh pr view "$1" --json baseRefName --jq '.baseRefName' 2>/dev/null || true; }
 
   [[ -n "$(base_of "$cur")" ]] \
     || die "no open PR found for '$cur'; can't infer its stack (open a PR or record parents manually with 'git stack parent')."
@@ -344,20 +341,21 @@ cmd_infer() {
     guard=$((guard + 1)); [[ $guard -gt 1000 ]] && die "cycle in PR base pointers."
   done
 
-  # Trace UP: BFS over the PR graph for any branch whose base is already in the
-  # set. The here-string loop runs in the current shell, so updates persist.
+  # Trace UP: BFS outward, asking GitHub for the open PRs whose base is each
+  # branch already in the set. The process-substitution loop runs in the current
+  # shell, so updates to $inset/$links/$queue persist.
   local -a queue=(); read -ra queue <<< "$inset"
   while [[ ${#queue[@]} -gt 0 ]]; do
     local x="${queue[0]}"; queue=("${queue[@]:1}")
-    local h b
-    while IFS=$'\t' read -r h b; do
+    local h
+    while IFS= read -r h; do
       [[ -n "$h" ]] || continue
-      if [[ "$b" == "$x" && "$inset" != *" $h "* ]]; then
+      if [[ "$inset" != *" $h "* ]]; then
         inset+="$h "
         links+="$h"$'\t'"$x"$'\n'
         queue+=("$h")
       fi
-    done <<< "$prs"
+    done < <(gh pr list --state open --base "$x" --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
   done
 
   parent_of() { awk -F'\t' -v b="$1" '$1==b {print $2; exit}' <<< "$links"; }
@@ -823,6 +821,147 @@ cmd_restack() {
   esac
 }
 
+# ---- sync ----------------------------------------------------------------
+# Drop merged branches from the stack, then restack what remains.
+#
+#   trunk <- a <- b <- c   and `a` is merged   =>   trunk <- b <- c
+#   trunk <- a <- b <- c   and `b` is merged   =>   trunk <- a <- c
+#
+# A branch counts as merged if its GitHub PR is in the MERGED state, or its tip
+# is already an ancestor of origin/<trunk> (a non-squash or local merge). Each
+# merged branch is removed like `git stack remove` (its children reparent onto
+# its parent and the local branch is deleted); reading the parent fresh each
+# time means consecutive merged branches collapse correctly. Whatever remains is
+# handed to `git stack restack` to rebase + push into one clean linear history.
+cmd_sync() {
+  local push=1 offline=0 dry=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push) push=0 ;;
+      --offline) offline=1; push=0 ;;
+      --dry-run) dry=1 ;;
+      -h|--help) echo "usage: git stack sync [--no-push] [--offline] [--dry-run]"; return 0 ;;
+      *) die "usage: git stack sync [--no-push] [--offline] [--dry-run]" ;;
+    esac
+    shift
+  done
+
+  local cur trunk
+  cur=$(current_branch)
+  [[ -n "$cur" ]] || die "detached HEAD; checkout a stack branch first."
+  trunk=$(stack_trunk)
+  [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch first."
+
+  # Collect the whole stack, root -> leaf (parents before children).
+  local -a chain=()
+  local b
+  while IFS= read -r b; do
+    [[ -z "$b" ]] && continue
+    case "$b" in
+      ERR:on-trunk)    die "you're on trunk ('$trunk'); checkout a stack branch." ;;
+      ERR:no-parent:*) die "branch '${b#ERR:no-parent:}' has no parent. Record one with: git stack parent <parent>" ;;
+      ERR:cycle)       die "parent pointers form a cycle." ;;
+      ERR:*)           die "'$cur' is not part of a tracked stack." ;;
+    esac
+    chain+=("$b")
+  done < <(stack_collect "$cur" || true)
+  [[ ${#chain[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
+
+  # Fetch so both merge detection and the later restack see the latest remote.
+  if [[ $offline -eq 0 ]]; then
+    info "fetching origin…"
+    git fetch --quiet origin 2>/dev/null || info "git fetch origin failed; continuing with local state."
+  fi
+
+  # Which branches are merged? Prefer each branch's GitHub PR state (catches
+  # squash merges and merges into a non-trunk parent); fall back to git ancestry
+  # when gh is absent or the branch has no PR.
+  local have_gh=0
+  if command -v gh >/dev/null 2>&1; then
+    have_gh=1
+  else
+    info "gh CLI not found; detecting merges by git ancestry only."
+  fi
+
+  # Compare ancestry against origin/<trunk> when present (most up-to-date),
+  # otherwise the local trunk ref.
+  local trunk_ref="$trunk"
+  git rev-parse --verify --quiet "refs/remotes/origin/$trunk" >/dev/null \
+    && trunk_ref="origin/$trunk"
+
+  is_merged() { # branch ; uses $have_gh and $trunk_ref
+    local x="$1"
+    if [[ $have_gh -eq 1 ]]; then
+      [[ "$(gh pr view "$x" --json state --jq '.state' 2>/dev/null || true)" == "MERGED" ]] \
+        && return 0
+    fi
+    is_ancestor "$x" "$trunk_ref" && return 0
+    return 1
+  }
+
+  local -a merged=() survivors=()
+  for b in "${chain[@]}"; do
+    if is_merged "$b"; then merged+=("$b"); else survivors+=("$b"); fi
+  done
+
+  if [[ $dry -eq 1 ]]; then
+    if [[ ${#merged[@]} -eq 0 ]]; then
+      echo "no merged branches; would restack the stack as-is."
+    else
+      echo "would drop merged branch(es):"
+      for b in "${merged[@]}"; do
+        printf '  %-24s (was on %s)\n' "$b" "$(stack_parent "$b")"
+      done
+      echo "remaining stack would be (then restacked):"
+      if [[ ${#survivors[@]} -eq 0 ]]; then
+        printf '  (empty — the whole stack is merged)\n'
+      else
+        for b in "${survivors[@]}"; do printf '  %s\n' "$b"; done
+      fi
+    fi
+    return 0
+  fi
+
+  [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
+
+  if [[ ${#merged[@]} -eq 0 ]]; then
+    info "no merged branches to drop; restacking."
+  else
+    # If we're sitting on a branch about to be deleted, move to a survivor first:
+    # the nearest surviving ancestor, else the root-most survivor, else trunk.
+    local in_merged=" ${merged[*]} "
+    if [[ "$in_merged" == *" $cur "* ]]; then
+      local target="" node="$cur" p
+      while :; do
+        p=$(stack_parent "$node")
+        [[ -z "$p" || "$p" == "$trunk" ]] && break
+        if [[ "$in_merged" != *" $p "* ]]; then target="$p"; break; fi
+        node="$p"
+      done
+      if [[ -z "$target" && ${#survivors[@]} -gt 0 ]]; then target="${survivors[0]}"; fi
+      [[ -z "$target" ]] && target="$trunk"
+      info "leaving merged branch '$cur'; checking out '$target'."
+      git checkout --quiet "$target"
+    fi
+
+    for b in "${merged[@]}"; do
+      info "dropping merged branch '$b'."
+      cmd_remove "$b"
+    done
+  fi
+
+  if [[ ${#survivors[@]} -eq 0 ]]; then
+    info "the whole stack was merged; nothing left to restack."
+    return 0
+  fi
+
+  # Restack the remainder into a clean linear history (fetches + pushes too).
+  local -a rargs=()
+  [[ $push -eq 0 ]] && rargs+=(--no-push)
+  [[ $offline -eq 1 ]] && rargs+=(--offline)
+  cmd_restack ${rargs[@]+"${rargs[@]}"}
+}
+
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 case "$sub" in
   show|"")        cmd_show "$@" ;;
@@ -836,6 +975,7 @@ case "$sub" in
   remove)         cmd_remove "$@" ;;
   collapse)       cmd_collapse "$@" ;;
   restack)        cmd_restack "$@" ;;
+  sync)           cmd_sync "$@" ;;
   trunk)          cmd_trunk "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;
