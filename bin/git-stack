@@ -907,11 +907,15 @@ restack_finish() {
 
   if [[ "$push" == 1 && "$offline" == 0 ]]; then
     local line b _p _b _o
+    local -a branches=()
     while IFS= read -r line; do
       IFS="$TAB" read -r b _p _b _o <<<"$line"
-      info "pushing $b (--force-with-lease)"
-      git push -u --force-with-lease origin "$b"
+      branches+=("$b")
     done < <(restack_load_plan)
+    if [[ ${#branches[@]} -gt 0 ]]; then
+      info "pushing ${#branches[@]} branch(es) in one push (--force-with-lease): ${branches[*]}"
+      git push -u --force-with-lease origin "${branches[@]}"
+    fi
   fi
 
   git checkout --quiet "$orig"
