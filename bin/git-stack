@@ -31,6 +31,8 @@
 #                                   --continue / --abort to resume or undo a conflict
 #   git stack sync                  drop merged branches from the stack (reparenting
 #                                   their children) then restack the remainder
+#   git stack sync-all              run sync on every tracked stack (each tree on
+#                                   trunk), one after another
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 
 set -euo pipefail
@@ -1126,6 +1128,59 @@ cmd_sync() {
   cmd_restack ${rargs[@]+"${rargs[@]}"}
 }
 
+# Run `git stack sync` on every tracked stack (each tree rooted on trunk), one
+# after another. Collects all stack roots up front, then for each checks that
+# stack out and syncs it (drop merged branches, restack the rest). Stacks are
+# independent trees, so syncing one never disturbs another's branches — meaning
+# the roots captured up front stay valid even as each sync mutates its own
+# stack. Returns you to the branch you started on when it still exists. Flags
+# are forwarded verbatim to each per-stack sync.
+cmd_sync_all() {
+  local -a passthru=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push|--offline|--dry-run) passthru+=("$1") ;;
+      -h|--help) echo "usage: git stack sync-all [--no-push] [--offline] [--dry-run]"; return 0 ;;
+      *) die "usage: git stack sync-all [--no-push] [--offline] [--dry-run]" ;;
+    esac
+    shift
+  done
+
+  local trunk orig
+  trunk=$(stack_trunk)
+  orig=$(current_branch)
+
+  # Every stack root: a tracked branch whose parent is the trunk.
+  local -a roots=()
+  local b
+  while IFS= read -r b; do
+    [[ -z "$b" ]] && continue
+    [[ "$(stack_parent "$b")" == "$trunk" ]] && roots+=("$b")
+  done < <(stack_tracked_branches)
+  [[ ${#roots[@]} -gt 0 ]] || die "no tracked stacks found (record one with: git stack parent <parent>)."
+  IFS=$'\n' roots=($(printf '%s\n' "${roots[@]}" | sort)); unset IFS
+
+  local n=${#roots[@]} i=0 r
+  for r in "${roots[@]}"; do
+    i=$((i + 1))
+    if ! branch_exists "$r"; then
+      info "[$i/$n] stack root '$r' no longer exists; skipping."
+      continue
+    fi
+    info "[$i/$n] syncing stack rooted at '$r'."
+    git checkout --quiet "$r"
+    cmd_sync ${passthru[@]+"${passthru[@]}"}
+  done
+
+  # Return to where we started when it survived the syncs.
+  if [[ -n "$orig" ]] && branch_exists "$orig"; then
+    git checkout --quiet "$orig"
+    info "sync-all complete; back on '$orig'."
+  else
+    info "sync-all complete."
+  fi
+}
+
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 case "$sub" in
   show|"")        cmd_show "$@" ;;
@@ -1141,6 +1196,7 @@ case "$sub" in
   collapse)       cmd_collapse "$@" ;;
   restack)        cmd_restack "$@" ;;
   sync)           cmd_sync "$@" ;;
+  sync-all)       cmd_sync_all "$@" ;;
   trunk)          cmd_trunk "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;
