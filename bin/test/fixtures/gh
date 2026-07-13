@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# fake gh — a test double for the GitHub CLI, only implementing the subcommands
+# git-stack actually calls. Reads fixture "databases" written by the harness:
+#
+#   $GH_PR_DB       TSV: branch  base  state  number  additions  deletions  title
+#   $GH_COMMENTS_DB TSV: branch  id    author
+#   $GH_COMMENT_LOG  (appended)  branch  body        <- `gh pr comment`
+#   $GH_GRAPHQL_LOG  (appended)  id                  <- minimizeComment mutations
+#
+# JSON is built from the TSV rows and — when a `--jq` filter is given — piped
+# through the REAL jq, so filtering behaves exactly as in production.
+
+set -euo pipefail
+
+die() { echo "fake-gh: $*" >&2; exit 1; }
+
+# Build a JSON object for one PR row (all known fields), for `gh pr view`.
+pr_json() { # branch
+  local branch="$1" row base state num add del title
+  row=$(awk -F'\t' -v b="$branch" '$1==b {print; exit}' "${GH_PR_DB:-/dev/null}")
+  [[ -n "$row" ]] || return 1
+  IFS=$'\t' read -r _ base state num add del title <<<"$row"
+
+  # comments[] for this branch from the comments DB.
+  local comments="[]"
+  if [[ -s "${GH_COMMENTS_DB:-/dev/null}" ]]; then
+    comments=$(awk -F'\t' -v b="$branch" '$1==b {print $2"\t"$3}' "$GH_COMMENTS_DB" \
+      | jq -R -s 'split("\n") | map(select(length>0) | split("\t")) | map({id: .[0], author: {login: .[1]}})')
+  fi
+
+  jq -n \
+    --argjson number "$num" \
+    --arg url "https://example.test/pr/$num" \
+    --argjson additions "$add" \
+    --argjson deletions "$del" \
+    --arg title "$title" \
+    --arg state "$state" \
+    --arg baseRefName "$base" \
+    --argjson comments "$comments" \
+    '{number:$number, url:$url, additions:$additions, deletions:$deletions,
+      title:$title, state:$state, baseRefName:$baseRefName, comments:$comments}'
+}
+
+cmd_pr() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    view)
+      local branch="$1"; shift
+      local jqf=""
+      # skip --json <fields>; capture --jq <filter>
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json) shift ;;                 # field list is irrelevant; we emit all
+          --jq)   jqf="$2"; shift ;;
+          *) ;;
+        esac
+        shift
+      done
+      local obj
+      obj=$(pr_json "$branch") || exit 1   # no PR: exit nonzero (git-stack treats as "no PR")
+      if [[ -n "$jqf" ]]; then jq -r "$jqf" <<<"$obj"; else echo "$obj"; fi
+      ;;
+    list)
+      local base="" state="" jqf=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --base)  base="$2"; shift ;;
+          --state) state="$2"; shift ;;
+          --json)  shift ;;
+          --jq)    jqf="$2"; shift ;;
+          *) ;;
+        esac
+        shift
+      done
+      # Rows whose base == $base (and, if state filter given, matching state).
+      local arr
+      arr=$(awk -F'\t' -v base="$base" -v st="$state" '
+        $2==base && (st=="" || tolower($3)==tolower(st)) {print $1}' "${GH_PR_DB:-/dev/null}" \
+        | jq -R -s 'split("\n") | map(select(length>0) | {headRefName: .})')
+      if [[ -n "$jqf" ]]; then jq -r "$jqf" <<<"$arr"; else echo "$arr"; fi
+      ;;
+    comment)
+      local branch="$1"; shift
+      local body=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in --body) body="$2"; shift ;; *) ;; esac
+        shift
+      done
+      printf '%s\t%s\n' "$branch" "$body" >>"${GH_COMMENT_LOG:-/dev/null}"
+      ;;
+    *) die "unsupported: gh pr $sub" ;;
+  esac
+}
+
+cmd_api() {
+  # Only graphql minimizeComment is used. Log the -F id=… and succeed.
+  local id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -F) [[ "$2" == id=* ]] && id="${2#id=}"; shift ;;
+      *) ;;
+    esac
+    shift
+  done
+  [[ -n "$id" ]] && printf '%s\n' "$id" >>"${GH_GRAPHQL_LOG:-/dev/null}"
+  echo '{"data":{"minimizeComment":{"minimizedComment":{"isMinimized":true}}}}'
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    pr)  cmd_pr "$@" ;;
+    api) cmd_api "$@" ;;
+    --version) echo "gh version 0.0.0 (fake)" ;;
+    *) die "unsupported: gh $cmd" ;;
+  esac
+}
+
+main "$@"

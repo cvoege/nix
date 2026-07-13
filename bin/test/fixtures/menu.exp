@@ -1,0 +1,44 @@
+#!/usr/bin/env expect
+# menu.exp — drive `git stack checkout`'s interactive /dev/tty menu under a PTY.
+#
+#   menu.exp down   <n>      move down n entries, then Enter
+#   menu.exp new    <name>   move to the "＋ new branch" entry, Enter, type <name>
+#   menu.exp cancel          press q
+#
+# Inherits env (PATH, GIT_CONFIG_GLOBAL, …) and cwd from the caller. Exits with
+# the child's exit status so `run` can assert on it.
+
+set timeout 10
+set action [lindex $argv 0]
+set arg    [lindex $argv 1]
+
+spawn git stack checkout
+
+# Wait for the menu to render: each entry looks like "branch  (on parent)".
+expect {
+  timeout { puts "TIMEOUT waiting for menu"; exit 90 }
+  -re {\(on }
+}
+
+switch -- $action {
+  down {
+    for {set i 0} {$i < $arg} {incr i} { send "\033\[B" }
+    send "\r"
+  }
+  new {
+    # Many downs clamp at the last entry (the new-branch line).
+    for {set i 0} {$i < 50} {incr i} { send "\033\[B" }
+    send "\r"
+    expect {
+      timeout { puts "TIMEOUT waiting for name prompt"; exit 91 }
+      -re {new branch name}
+    }
+    send "$arg\r"
+  }
+  cancel { send "q" }
+  default { puts "unknown action: $action"; exit 92 }
+}
+
+expect eof
+catch wait result
+exit [lindex $result 3]
