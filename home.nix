@@ -258,11 +258,11 @@ in
       source ~/.nix-profile/share/bash-completion/completions/git
       source ~/.nix-profile/share/bash-completion/completions/ssh
 
-      if test -f ~/google-cloud-sdk/completion.bash.inc ; then
-        source ~/google-cloud-sdk/completion.bash.inc
+      if test -f ~/code/gcloud-cli/google-cloud-sdk/completion.bash.inc ; then
+        source ~/code/gcloud-cli/google-cloud-sdk/completion.bash.inc
       fi
-      if test -f ~/google-cloud-sdk/path.bash.inc ; then
-        source ~/google-cloud-sdk/path.bash.inc
+      if test -f ~/code/gcloud-cli/google-cloud-sdk/path.bash.inc ; then
+        source ~/code/gcloud-cli/google-cloud-sdk/path.bash.inc
       fi
       if test -d ~/code/gcloud-cli/google-cloud-sdk/bin/ ; then
         export PATH="$PATH:$HOME/code/gcloud-cli/google-cloud-sdk/bin/"
@@ -313,6 +313,58 @@ in
         git add -A
         git commit -nm "$MSG"
         git put
+      }
+
+      r() {
+        pnpm run --filter "@getaleph/$1" "$2"
+      }
+
+      # cw <branch> [prompt]
+      # Opens a new tmux window running a fresh claude session in a git worktree on <branch>.
+      cw() {
+        local branch="$1"
+        local prompt="$2"
+
+        if [ -z "$branch" ]; then
+          echo "usage: cw <branch> [prompt]" >&2
+          return 1
+        fi
+
+        # Window name: default to the branch name, but for branches shaped like
+        # colton/act-123-whatever, use the ticket id (ACT-123) instead.
+        local window="$branch"
+        if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
+          window="$(echo "''${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+        fi
+
+        # Resolve worktree location and repo root.
+        local repo_root worktree
+        repo_root="$(git rev-parse --show-toplevel)" || return 1
+        worktree="$repo_root/../$(basename "$repo_root")-worktrees/$window"
+
+        # Fetch so we know whether the branch exists on origin, and so we base
+        # new branches on the latest trunk.
+        git fetch origin --quiet
+
+        if git show-ref --verify --quiet "refs/heads/$branch" ||
+           git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+          # Branch already exists: pull it from origin and check it out in the worktree.
+          git fetch origin "$branch:$branch" 2>/dev/null || git branch -f "$branch" "origin/$branch"
+          git worktree add "$worktree" "$branch" || return 1
+        else
+          # New branch, always based on the latest origin/trunk.
+          git worktree add -b "$branch" "$worktree" origin/trunk || return 1
+        fi
+
+        # Open a new tmux window with an empty shell, then type the claude command
+        # into it — when claude exits you're back at the shell, so the pane stays.
+        local win_id cmd
+        win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
+        cmd="claude"
+        [ -n "$prompt" ] && cmd="claude $(printf '%q' "$prompt")"
+        tmux send-keys -t "$win_id.0" "$cmd" Enter
+        tmux split-window -v -t "$win_id" -c "$worktree"
+        tmux select-pane -t "$win_id.0"
       }
     '';
   };
