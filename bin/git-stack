@@ -25,6 +25,9 @@
 #   git stack remove <name>         delete a branch and re-parent its children onto its parent
 #   git stack collapse              flatten a linear stack into its root branch
 #                                   (ff-merge each branch down, push, remove the leaf)
+#   git stack collapse <s> [<e>]    collapse only the range <s>..<e> into <s>
+#                                   (branches above <e> reparent onto <s>);
+#                                   omit <e> to fold everything above <s> in
 #   git stack restack               rebase the whole stack into one clean linear
 #                                   history (fetch, rebase bottom->top, force-push);
 #                                   --squash collapses each branch to one commit;
@@ -202,50 +205,107 @@ cmd_remove() {
   info "deleted '$branch' (was stacked on '$parent')."
 }
 
-# Flatten an entire linear stack into its root branch (the one on trunk).
+# Flatten a linear stack (or a range of one) into a single branch.
 #
 #   trunk <- a <- b <- c    becomes    trunk <- a   (a holds all the work)
 #
 # Working from the top down: check out the second-furthest branch, fast-forward
 # merge the furthest into it, push, then `git stack remove` the furthest. Repeat
-# until only the root branch (parent == trunk) remains.
+# until only the base branch remains.
+#
+# With no positional args, the base is the root of the current stack (parent ==
+# trunk) and the whole stack is folded in. Given a <start> (and optional <end>),
+# only the range <start>..<end> is collapsed into <start>:
+#
+#   trunk <- a <- b <- c <- d <- e   +   collapse b d
+#                becomes
+#   trunk <- a <- b <- e             (b holds b+c+d; e reparents onto b)
+#
+# Branches above <end> reparent onto <start> for free: `git stack remove`
+# reparents a removed branch's children onto its parent, and the parent at each
+# step down the path is the next branch toward <start>.
 cmd_collapse() {
   local push=1 dry=0
+  local -a pos=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-push) push=0 ;;
       --dry-run) dry=1 ;;
-      -h|--help) echo "usage: git stack collapse [--no-push] [--dry-run]"; return 0 ;;
-      *) die "usage: git stack collapse [--no-push] [--dry-run]" ;;
+      -h|--help) echo "usage: git stack collapse [--no-push] [--dry-run] [<start> [<end>]]"; return 0 ;;
+      -*) die "usage: git stack collapse [--no-push] [--dry-run] [<start> [<end>]]" ;;
+      *) pos+=("$1") ;;
     esac
     shift
   done
+  [[ ${#pos[@]} -le 2 ]] || die "usage: git stack collapse [--no-push] [--dry-run] [<start> [<end>]]"
 
-  local cur trunk
-  cur=$(current_branch)
-  [[ -n "$cur" ]] || die "detached HEAD; checkout a stack branch first."
-  trunk=$(stack_trunk)
-  [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch."
+  local trunk; trunk=$(stack_trunk)
 
-  # Collect the whole stack, root -> leaf (parents before children).
+  # Build the ordered chain (parents before children) to collapse into chain[0].
   local -a chain=()
-  local b
-  while IFS= read -r b; do
-    [[ -z "$b" ]] && continue
-    stack_check_err "$b"
-    chain+=("$b")
-  done < <(stack_collect "$cur" || true)
-  [[ ${#chain[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
+  local i n kids
+  if [[ ${#pos[@]} -eq 0 ]]; then
+    # Whole current stack: root -> leaf.
+    local cur; cur=$(current_branch)
+    [[ -n "$cur" ]] || die "detached HEAD; checkout a stack branch first."
+    [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch."
+    local b
+    while IFS= read -r b; do
+      [[ -z "$b" ]] && continue
+      stack_check_err "$b"
+      chain+=("$b")
+    done < <(stack_collect "$cur" || true)
+    [[ ${#chain[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
 
-  # Collapse only makes sense on a linear stack: every non-leaf has one child.
-  local i n=${#chain[@]} kids
-  for ((i = 0; i < n - 1; i++)); do
-    kids=$(stack_children "${chain[$i]}" | grep -c . || true)
-    [[ "$kids" -le 1 ]] || die "stack is not linear: '${chain[$i]}' has multiple children; collapse only works on a linear stack."
-  done
+    # Collapse only makes sense on a linear stack: every non-leaf has one child.
+    n=${#chain[@]}
+    for ((i = 0; i < n - 1; i++)); do
+      kids=$(stack_children "${chain[$i]}" | grep -c . || true)
+      [[ "$kids" -le 1 ]] || die "stack is not linear: '${chain[$i]}' has multiple children; collapse only works on a linear stack."
+    done
+  else
+    # Explicit range: start .. end (end defaults to the leaf above start).
+    local start="${pos[0]}" end
+    branch_exists "$start" || die "no such branch: '$start'."
+    [[ -n "$(stack_parent "$start")" ]] || die "'$start' has no stack parent recorded (not a tracked stack branch)."
+    if [[ ${#pos[@]} -eq 2 ]]; then
+      end="${pos[1]}"
+      branch_exists "$end" || die "no such branch: '$end'."
+    else
+      # Descend single-child links from start to the leaf; a fork needs <end>.
+      end="$start"
+      while :; do
+        kids=$(stack_children "$end" | grep -c . || true)
+        [[ "$kids" -eq 0 ]] && break
+        [[ "$kids" -eq 1 ]] || die "stack forks above '$end'; pass an explicit <end> branch."
+        end=$(stack_children "$end" || true)
+      done
+    fi
 
+    # Walk parents up from end to start, prepending each node onto the path.
+    local node="$end" p guard=0
+    chain=("$end")
+    while [[ "$node" != "$start" ]]; do
+      p=$(stack_parent "$node")
+      [[ -n "$p" && "$p" != "$trunk" ]] || die "'$end' is not above '$start' in the stack."
+      node="$p"
+      chain=("$node" "${chain[@]}")
+      guard=$((guard + 1)); [[ $guard -gt 1000 ]] && die "parent pointers form a cycle."
+    done
+
+    # Every node on the path except end must have exactly one child, so we never
+    # silently drop a sibling branch. end's own children are unrestricted; they
+    # reparent onto start as the path collapses.
+    n=${#chain[@]}
+    for ((i = 0; i < n - 1; i++)); do
+      kids=$(stack_children "${chain[$i]}" | grep -c . || true)
+      [[ "$kids" -eq 1 ]] || die "cannot collapse: '${chain[$i]}' has $kids children (need exactly one on the path to '$end')."
+    done
+  fi
+
+  n=${#chain[@]}
   if [[ $n -eq 1 ]]; then
-    info "stack has a single branch ('${chain[0]}'); nothing to collapse."
+    info "range has a single branch ('${chain[0]}'); nothing to collapse."
     return 0
   fi
   [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
@@ -255,7 +315,7 @@ cmd_collapse() {
     for ((i = n - 1; i > 0; i--)); do
       printf '  ff-merge %-24s into %-24s, push, then remove %s\n' "${chain[$i]}" "${chain[$((i - 1))]}" "${chain[$i]}"
     done
-    printf "  result: single branch '%s' on '%s'\n" "${chain[0]}" "$trunk"
+    printf "  result: work folded into '%s'; children of '%s' reparent onto it\n" "${chain[0]}" "${chain[$((n - 1))]}"
     return 0
   fi
 
@@ -274,7 +334,7 @@ cmd_collapse() {
     cmd_remove "$leaf"
   done
 
-  info "collapse complete; stack flattened into '${chain[0]}' on '$trunk'."
+  info "collapse complete; work folded into '${chain[0]}'."
 }
 
 # Interactive arrow-key menu. First argument is the initial 0-based selection;

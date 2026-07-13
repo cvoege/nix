@@ -352,8 +352,16 @@ in
           git fetch origin "$branch:$branch" 2>/dev/null || git branch -f "$branch" "origin/$branch"
           git worktree add "$worktree" "$branch" || return 1
         else
-          # New branch, always based on the latest origin/trunk.
-          git worktree add -b "$branch" "$worktree" origin/trunk || return 1
+          # New branch, always based on the latest trunk. Determine the remote's
+          # default branch name (main, trunk, master, ...) rather than assuming.
+          local trunk
+          trunk="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" ||
+            trunk="$(git remote show origin | sed -n 's/.*HEAD branch: //p')"
+          if [ -z "$trunk" ]; then
+            echo "cw: could not determine origin's default branch" >&2
+            return 1
+          fi
+          git worktree add -b "$branch" "$worktree" "$trunk" || return 1
         fi
 
         # Open a new tmux window with an empty shell, then type the claude command
