@@ -319,7 +319,7 @@ in
         local pkg="$1"
         local script="$2"
         shift 2
-        pnpm run --filter "@getaleph/$pkg" "$script" "$@"
+        pnpm turbo run --filter "@getaleph/$pkg" "$script" "$@"
       }
 
       rename-diff() {
