@@ -379,7 +379,9 @@ in
         [ -n "$prompt" ] && cmd="claude $(printf '%q' "$prompt")"
         tmux send-keys -t "$win_id.0" "$cmd" Enter
         tmux split-window -v -t "$win_id" -c "$worktree"
+        tmux send-keys -t "$win_id.1" 'pnpm install --frozen-lockfile && doppler setup --no-interactive && cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json && cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json' Enter
         tmux select-pane -t "$win_id.0"
+
       }
     '';
   };
