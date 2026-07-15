@@ -66,6 +66,15 @@ stack_set_parent() { git config "branch.$1.stackParent" "$2"; }
 
 stack_unset_parent() { git config --unset "branch.$1.stackParent" 2>/dev/null || true; }
 
+# One-shot rebase base ("fork point") recorded when a branch is reparented off a
+# branch that's being removed (e.g. a squash-merged parent). It pins the commit
+# a restack should replay from, so only the branch's own commits move — not the
+# removed parent's, which may now live in trunk as a squash commit. Consumed and
+# cleared by the next successful restack.
+stack_fork_base()       { git config --get "branch.$1.stackForkBase" || true; }
+stack_set_fork_base()   { git config "branch.$1.stackForkBase" "$2"; }
+stack_unset_fork_base() { git config --unset "branch.$1.stackForkBase" 2>/dev/null || true; }
+
 current_branch() { git symbolic-ref --quiet --short HEAD 2>/dev/null || true; }
 
 # All local branches that have a recorded parent.
@@ -198,8 +207,15 @@ cmd_remove() {
   while read -r child; do
     [[ -n "$child" ]] || continue
     stack_set_parent "$child" "$parent"
+    # Pin the child's fork point off the branch we're removing, so a later
+    # restack replays only the child's own commits — not this branch's, which
+    # may now live in trunk as a squash-merge commit. merge-base is the true
+    # fork point even if this branch gained commits the child never rebased onto.
+    local fb; fb=$(git merge-base "$branch" "$child" 2>/dev/null || true)
+    [[ -n "$fb" ]] && stack_set_fork_base "$child" "$fb"
     info "reparented '$child' onto '$parent'."
   done < <(stack_children "$branch")
+  stack_unset_fork_base "$branch"
   stack_unset_parent "$branch"
   git branch -D "$branch"
   info "deleted '$branch' (was stacked on '$parent')."
@@ -906,10 +922,18 @@ restack_build_plan() { # writes STATE; echoes nothing
     echo "SQUASH=$SQUASH"
     echo "IDX=0"
     echo "--PLAN--"
-    local b parent base orig_sha
+    local b parent base fork_base orig_sha
     for b in "${branches[@]}"; do
       parent=$(stack_parent "$b")
-      base=$(sha "$parent") || die "parent '$parent' of '$b' has no commit."
+      # A recorded fork base (set when $b was reparented off a removed branch)
+      # overrides the parent's tip: it's the true point to replay $b's commits
+      # from. Otherwise the parent's current tip is the fork point, as usual.
+      fork_base=$(stack_fork_base "$b")
+      if [[ -n "$fork_base" ]]; then
+        base=$(sha "$fork_base") || die "recorded fork base of '$b' is not a commit: $fork_base"
+      else
+        base=$(sha "$parent") || die "parent '$parent' of '$b' has no commit."
+      fi
       orig_sha=$(sha "$b")
       printf '%s\t%s\t%s\t%s\n' "$b" "$parent" "$base" "$orig_sha"
     done
@@ -962,16 +986,21 @@ EOF
 }
 
 restack_finish() {
-  local push offline orig
+  local push offline orig line b _p _b _o
   push=$(restack_load_header PUSH); offline=$(restack_load_header OFFLINE); orig=$(restack_load_header ORIG_REF)
 
+  # Collect the plan's branches, then drop any one-shot fork-base overrides:
+  # a completed restack leaves each branch genuinely stacked on its parent, so
+  # the parent's tip is once again the correct fork point. (Left intact on
+  # --abort, where branches stay reparented-but-not-rebased for a retry.)
+  local -a branches=()
+  while IFS= read -r line; do
+    IFS="$TAB" read -r b _p _b _o <<<"$line"
+    branches+=("$b")
+  done < <(restack_load_plan)
+  for b in "${branches[@]}"; do stack_unset_fork_base "$b"; done
+
   if [[ "$push" == 1 && "$offline" == 0 ]]; then
-    local line b _p _b _o
-    local -a branches=()
-    while IFS= read -r line; do
-      IFS="$TAB" read -r b _p _b _o <<<"$line"
-      branches+=("$b")
-    done < <(restack_load_plan)
     if [[ ${#branches[@]} -gt 0 ]]; then
       info "pushing ${#branches[@]} branch(es) in one push (--force-with-lease): ${branches[*]}"
       git push -u --force-with-lease origin "${branches[@]}"

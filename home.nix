@@ -316,7 +316,14 @@ in
       }
 
       r() {
-        pnpm run --filter "@getaleph/$1" "$2"
+        local pkg="$1"
+        local script="$2"
+        shift 2
+        pnpm run --filter "@getaleph/$pkg" "$script" "$@"
+      }
+
+      rename-diff() {
+        git diff -M20 --color-moved=dimmed-zebra --color-moved-ws=ignore-all-space $@
       }
 
       # cw <branch> [prompt]
