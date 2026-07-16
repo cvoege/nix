@@ -386,7 +386,7 @@ in
       gwrma() {
         local repo_root worktree
         repo_root="$(git rev-parse --show-toplevel)" || return 1
-        worktree_root="$repo_root/../$(basename "$repo_root")-worktrees"
+        worktree_root="$(realpath "$repo_root/../$(basename "$repo_root")-worktrees")"
         for worktree in $(git worktree list | awk '{print $1}' | grep "$worktree_root") ; do git worktree remove "$worktree" ; done
       }
     '';
