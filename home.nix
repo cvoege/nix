@@ -362,8 +362,7 @@ in
           # New branch, always based on the latest trunk. Determine the remote's
           # default branch name (main, trunk, master, ...) rather than assuming.
           local trunk
-          trunk="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" ||
-            trunk="$(git remote show origin | sed -n 's/.*HEAD branch: //p')"
+          trunk="$(git stack trunk)"
           if [ -z "$trunk" ]; then
             echo "cw: could not determine origin's default branch" >&2
             return 1
@@ -379,9 +378,16 @@ in
         [ -n "$prompt" ] && cmd="claude $(printf '%q' "$prompt")"
         tmux send-keys -t "$win_id.0" "$cmd" Enter
         tmux split-window -v -t "$win_id" -c "$worktree"
+        tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
         tmux send-keys -t "$win_id.1" 'pnpm install --frozen-lockfile && doppler setup --no-interactive && cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json && cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json' Enter
         tmux select-pane -t "$win_id.0"
+      }
 
+      gwrma() {
+        local repo_root worktree
+        repo_root="$(git rev-parse --show-toplevel)" || return 1
+        worktree_root="$repo_root/../$(basename "$repo_root")-worktrees"
+        for worktree in $(git worktree list | awk '{print $1}' | grep "$worktree_root") ; do git worktree remove "$worktree" ; done
       }
     '';
   };
