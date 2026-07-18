@@ -2,14 +2,45 @@
 
 set -euo pipefail
 
+# Where one-shot runs write their durable logs (NOT /tmp — kept around so a
+# finished run can be looked up later). Override with CW_LOG_DIR.
+CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
+
+# Flags handed to `claude` in --one-shot mode. Unattended runs can't answer
+# permission prompts, so skip them by default. Override with CW_ONESHOT_CLAUDE_FLAGS.
+CW_ONESHOT_CLAUDE_FLAGS="${CW_ONESHOT_CLAUDE_FLAGS:---dangerously-skip-permissions}"
+
+# cw install
+# Prepares a fresh worktree before claude can work in it: installs deps, runs
+# doppler setup, and copies in the clasp configs that aren't checked in. Shared
+# by the normal (second-pane) and --one-shot (inline) modes so they never
+# diverge — both invoke it as `cw install` in the worktree. The && chain keeps
+# the original fail-fast behaviour regardless of the caller's `set -e` state.
+cw_install() {
+  pnpm install --frozen-lockfile &&
+    doppler setup --no-interactive &&
+    cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json &&
+    cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json
+}
+
 # cw <branch> [prompt]
 # Opens a new tmux window running a fresh claude session in a git worktree on <branch>.
+#
+# With ONE_SHOT=1 (set via the --one-shot flag) it instead runs setup + a
+# headless `claude -p <prompt>` in a single pane, tees all output to a durable
+# log under $CW_LOG_DIR, then tears the worktree/window down via `cw --close`.
 cw() {
-  local branch="$1"
-  local prompt="$2"
+  local branch="${1:-}"
+  local prompt="${2:-}"
+  local one_shot="${ONE_SHOT:-0}"
 
   if [ -z "$branch" ]; then
     echo "usage: cw <branch> [prompt]" >&2
+    return 1
+  fi
+
+  if [ "$one_shot" = "1" ] && [ -z "$prompt" ]; then
+    echo "cw: --one-shot requires a prompt" >&2
     return 1
   fi
 
@@ -17,7 +48,7 @@ cw() {
   # colton/act-123-whatever, use the ticket id (ACT-123) instead.
   local window="$branch"
   if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
-    window="$(echo "''${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+    window="$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
   fi
 
   # Resolve worktree location and repo root.
@@ -29,25 +60,44 @@ cw() {
   # new branches on the latest trunk.
   git fetch origin --quiet
 
+  # trunk is needed both for basing new branches and for `git stack parent`.
+  local trunk
+  trunk="$(git stack trunk)"
+  if [ -z "$trunk" ]; then
+    echo "cw: could not determine origin's default branch" >&2
+    return 1
+  fi
+
   if git show-ref --verify --quiet "refs/heads/$branch" ||
       git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
     # Branch already exists: pull it from origin and check it out in the worktree.
     git fetch origin "$branch:$branch" 2>/dev/null || git branch -f "$branch" "origin/$branch"
     git worktree add "$worktree" "$branch" || return 1
   else
-    # New branch, always based on the latest trunk. Determine the remote's
-    # default branch name (main, trunk, master, ...) rather than assuming.
-    local trunk
-    trunk="$(git stack trunk)"
-    if [ -z "$trunk" ]; then
-      echo "cw: could not determine origin's default branch" >&2
-      return 1
-    fi
+    # New branch, always based on the latest trunk.
     git worktree add -b "$branch" "$worktree" "$trunk" || return 1
   fi
 
-  # Open a new tmux window with an empty shell, then type the claude command
-  # into it — when claude exits you're back at the shell, so the pane stays.
+  if [ "$one_shot" = "1" ]; then
+    # One-shot: everything runs in a single pane and the worktree tears itself
+    # down when claude exits. Setup + claude output is tee'd to a durable log.
+    mkdir -p "$CW_LOG_DIR"
+    local log
+    log="$CW_LOG_DIR/${window}-$(date +%Y%m%d-%H%M%S).log"
+    echo "cw: one-shot logging to $log"
+
+    local oneshot
+    oneshot="{ git stack parent '$trunk' && cw install && claude $CW_ONESHOT_CLAUDE_FLAGS -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw --close"
+
+    local win_id
+    win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
+    tmux send-keys -t "$win_id.0" "$oneshot" Enter
+    return 0
+  fi
+
+  # Normal mode: open a new tmux window with an empty shell, then type the
+  # claude command into it — when claude exits you're back at the shell, so the
+  # pane stays. A second pane handles setup.
   local win_id cmd
   win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
   cmd="claude"
@@ -55,22 +105,25 @@ cw() {
   tmux send-keys -t "$win_id.0" "$cmd" Enter
   tmux split-window -v -t "$win_id" -c "$worktree"
   tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-  tmux send-keys -t "$win_id.1" 'pnpm install --frozen-lockfile && doppler setup --no-interactive && cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json && cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json && echo "run close-cw to remove this worktree and close the window"' Enter
+  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw --close to remove this worktree and close the window"' Enter
   tmux select-pane -t "$win_id.0"
 }
 
-cwr() {
-  cw-temp "$1" "/code-review max --comment"
+# cw_review <branch>
+# One-shot code review: spins up the worktree, runs the review headless, tears down.
+cw_review() {
+  local branch="${1:-}"
+  ONE_SHOT=1 cw "$branch" "/code-review max --comment"
 }
 
-# close-cw [-f|--force]
+# cw_close [-f|--force]
 # Tears down the current cw worktree: removes the git worktree and closes
-# its tmux window (both panes). Run it from the second pane of a cw window.
+# its tmux window (both panes). Run it from inside a cw window.
 # Without --force, git refuses if the worktree has uncommitted or untracked
 # changes, so you don't lose work by accident.
-close-cw() {
+cw_close() {
   local force=""
-  if [ "$1" = "-f" ] || [ "$1" = "--force" ]; then
+  if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--force" ]; then
     force="--force"
   fi
 
@@ -80,7 +133,7 @@ close-cw() {
   # Only operate on cw worktrees (those living under <repo>-worktrees).
   worktree_root="$(basename "$(realpath "$worktree/..")")"
   if [[ "$worktree_root" != *-worktrees ]]; then
-    echo "close-cw: not inside a cw worktree" >&2
+    echo "cw_close: not inside a cw worktree" >&2
     return 1
   fi
 
@@ -96,7 +149,7 @@ close-cw() {
   cd "$main_root" || return 1
 
   if ! git -C "$main_root" worktree remove $force "$worktree"; then
-    echo "close-cw: worktree not removed (pass --force to discard changes)" >&2
+    echo "cw_close: worktree not removed (pass --force to discard changes)" >&2
     cd "$worktree" 2>/dev/null
     return 1
   fi
@@ -104,3 +157,46 @@ close-cw() {
   # Close the tmux window (both panes) if we're inside tmux.
   [ -n "$win_id" ] && tmux kill-window -t "$win_id"
 }
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  cw <branch> [prompt]            open a worktree + interactive claude in tmux
+  cw <branch> <prompt> --one-shot run claude headless, log output, auto-close
+  cw --review <branch>            one-shot code review of <branch>
+  cw --close [-f|--force]         tear down the current cw worktree + window
+  cw install                      prepare the current worktree (deps + configs)
+EOF
+}
+
+# --- argument dispatch ----------------------------------------------------
+# Flags select which action to run; everything else is collected as positional
+# args and forwarded to it. Add new flags by extending the case below.
+main() {
+  local action="cw"
+  local -a positional=()
+  export ONE_SHOT=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --close)     action="close" ;;
+      --review)    action="review" ;;
+      install)     action="install" ;;
+      --one-shot)  ONE_SHOT=1 ;;
+      -f|--force)  positional+=("$1") ;;
+      -h|--help)   usage; return 0 ;;
+      --)          shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done; break ;;
+      -*)          echo "cw: unknown option: $1" >&2; usage; return 1 ;;
+      *)           positional+=("$1") ;;
+    esac
+    shift
+  done
+
+  case "$action" in
+    close)  cw_close ${positional[@]+"${positional[@]}"} ;;
+    review) cw_review ${positional[@]+"${positional[@]}"} ;;
+    cw)     cw ${positional[@]+"${positional[@]}"} ;;
+  esac
+}
+
+main "$@"
