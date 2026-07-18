@@ -162,12 +162,12 @@ cw_oneshot_run() {
   # the instant claude/setup fails (which would skip the notify + teardown
   # below), and captures the failing exit code. With `pipefail` on and tee
   # effectively never failing, this is the pipeline body's status.
-
-  if [ "$status" -eq 0 ]; then
-    cnotify -s Glass "$branch finished" "cw one-shot" || true
-  else
-    cnotify -s Basso "$branch failed (exit $status)" "cw one-shot" || true
-  fi
+  echo "$status"
+  # if [ "$status" -eq 0 ]; then
+  #   cnotify -s Glass "$branch finished" "cw one-shot" || true
+  # else
+  #   cnotify -s Basso "$branch failed (exit $status)" "cw one-shot" || true
+  # fi
   cw_close
 }
 
