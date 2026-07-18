@@ -379,8 +379,50 @@ in
         tmux send-keys -t "$win_id.0" "$cmd" Enter
         tmux split-window -v -t "$win_id" -c "$worktree"
         tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-        tmux send-keys -t "$win_id.1" 'pnpm install --frozen-lockfile && doppler setup --no-interactive && cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json && cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json' Enter
+        tmux send-keys -t "$win_id.1" 'pnpm install --frozen-lockfile && doppler setup --no-interactive && cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json && cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json && echo "run close-cw to remove this worktree and close the window"' Enter
         tmux select-pane -t "$win_id.0"
+      }
+
+      # close-cw [-f|--force]
+      # Tears down the current cw worktree: removes the git worktree and closes
+      # its tmux window (both panes). Run it from the second pane of a cw window.
+      # Without --force, git refuses if the worktree has uncommitted or untracked
+      # changes, so you don't lose work by accident.
+      close-cw() {
+        local force=""
+        if [ "$1" = "-f" ] || [ "$1" = "--force" ]; then
+          force="--force"
+        fi
+
+        local worktree worktree_root main_root
+        worktree="$(git rev-parse --show-toplevel)" || return 1
+
+        # Only operate on cw worktrees (those living under <repo>-worktrees).
+        worktree_root="$(basename "$(realpath "$worktree/..")")"
+        if [[ "$worktree_root" != *-worktrees ]]; then
+          echo "close-cw: not inside a cw worktree" >&2
+          return 1
+        fi
+
+        # Find the main working tree so we can run git from outside the worktree
+        # we're about to remove.
+        main_root="$(git worktree list | awk 'NR==1{print $1}')"
+
+        # Capture the current tmux window before we move away.
+        local win_id
+        win_id="$(tmux display-message -p '#{window_id}' 2>/dev/null)"
+
+        # Step out of the worktree so removing its directory is safe.
+        cd "$main_root" || return 1
+
+        if ! git -C "$main_root" worktree remove $force "$worktree"; then
+          echo "close-cw: worktree not removed (pass --force to discard changes)" >&2
+          cd "$worktree" 2>/dev/null
+          return 1
+        fi
+
+        # Close the tmux window (both panes) if we're inside tmux.
+        [ -n "$win_id" ] && tmux kill-window -t "$win_id"
       }
 
       gwrma() {
