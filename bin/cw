@@ -92,22 +92,13 @@ cw() {
     log="$CW_LOG_DIR/${window//\//-}-$(date +%Y%m%d-%H%M%S).log"
     echo "cw: one-shot logging to $log"
 
-    local oneshot
-    oneshot="{ git stack parent '$trunk'"
-    oneshot+=" && echo \"Starting $(printf '%q' "$branch")\""
-    oneshot+=" && date"
-    oneshot+=" && cw install"
-    oneshot+=" && echo \"Starting claude...\""
-    oneshot+=" && claude --output-format stream-json --verbose --permission-mode auto -p $(printf '%q' "$prompt")"
-    oneshot+=" && echo \"Finishing $(printf '%q' "$branch")\""
-    oneshot+=" && date"
-    oneshot+=" ; } 2>&1 | tee $(printf '%q' "$log")"
-    oneshot+=" ; cw close"
-
-
+    # Ship only a short invocation to the pane; the actual pipeline lives in
+    # cw_oneshot so it can be written as normal bash. printf %q quotes the args
+    # for the trip through the pane's shell.
     local win_id
     win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
-    tmux send-keys -t "$win_id.0" "$oneshot" Enter
+    tmux send-keys -t "$win_id.0" \
+      "$(printf 'cw __oneshot %q %q %q %q' "$branch" "$prompt" "$log" "$trunk")" Enter
     return 0
   fi
 
@@ -123,6 +114,25 @@ cw() {
   tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
   tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
   tmux select-pane -t "$win_id.0"
+}
+
+# cw __oneshot <branch> <prompt> <log> <trunk>
+# Internal: runs inside the one-shot pane created by `cw`. Not part of the
+# public interface (not in usage()). Runs setup + headless claude, tees all
+# output to the durable log, then tears the worktree/window down via `cw close`.
+cw_oneshot() {
+  local branch="$1" prompt="$2" log="$3" trunk="$4"
+  {
+    git stack parent "$trunk" &&
+    echo "Starting $branch" &&
+    date &&
+    cw install &&
+    echo "Starting claude..." &&
+    claude --output-format stream-json --verbose --permission-mode auto -p "$prompt" &&
+    echo "Finishing $branch" &&
+    date
+  } 2>&1 | tee "$log" || true
+  cw close
 }
 
 # cw review <branch>
@@ -201,6 +211,7 @@ main() {
       close)       action="close" ;;
       review)      action="review" ;;
       install)     action="install" ;;
+      __oneshot)   action="__oneshot" ;;
       --one-shot)  ONE_SHOT=1 ;;
       -f|--force)  positional+=("$1") ;;
       -h|--help)   usage; return 0 ;;
@@ -212,10 +223,11 @@ main() {
   done
 
   case "$action" in
-    close)   cw_close ${positional[@]+"${positional[@]}"} ;;
-    review)  cw_review ${positional[@]+"${positional[@]}"} ;;
-    install) cw_install ;;
-    cw)      cw ${positional[@]+"${positional[@]}"} ;;
+    close)     cw_close ${positional[@]+"${positional[@]}"} ;;
+    review)    cw_review ${positional[@]+"${positional[@]}"} ;;
+    install)   cw_install ;;
+    __oneshot) cw_oneshot ${positional[@]+"${positional[@]}"} ;;
+    cw)        cw ${positional[@]+"${positional[@]}"} ;;
   esac
 }
 
