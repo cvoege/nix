@@ -13,22 +13,6 @@ CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 # diverge — both invoke it as `cw install` in the worktree. The && chain keeps
 # the original fail-fast behaviour regardless of the caller's `set -e` state.
 cw_install() {
-  # Seed node_modules from the primary checkout via a copy-on-write clone so
-  # pnpm reconciles a small delta instead of linking ~3.6G from scratch. The
-  # clone is near-instant and shares disk blocks (COW); with the repo's
-  # optimisticRepeatInstall, a matching tree makes the install a fast verify.
-  # macOS uses BSD cp's -c (clonefile) — must be /bin/cp, since the GNU cp on
-  # PATH lacks it. Linux uses GNU cp's --reflink=auto, which clones on
-  # reflink-capable filesystems (Btrfs/XFS/ZFS) and falls back to a full copy
-  # elsewhere (e.g. ext4) — correct either way, just no speedup on ext4.
-  local main_nm="$HOME/code/monorepo/node_modules"
-  if [ ! -e node_modules ] && [ -d "$main_nm" ]; then
-    if [ "$(uname)" = "Darwin" ]; then
-      /bin/cp -cR "$main_nm" node_modules || rm -rf node_modules
-    else
-      cp --reflink=auto -R "$main_nm" node_modules || rm -rf node_modules
-    fi
-  fi
   pnpm install --frozen-lockfile --prefer-offline || return
   doppler setup --no-interactive || true
 
