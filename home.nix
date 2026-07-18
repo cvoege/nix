@@ -93,6 +93,7 @@ in
     # `git stack restack` subcommand).
     # See ./bin/*; ~/.bin is already on PATH (set in programs.bash.initExtra).
     ".bin/git-stack" = { source = ./bin/git-stack; executable = true; };
+    ".bin/cw" = { source = ./bin/cw; executable = true; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
@@ -249,7 +250,7 @@ in
       alias o=xdg-open
     '') + ''
       export NIX_HOME_PATH="$HOME/.config/home-manager"
-      ehome() { zed "$NIX_HOME_PATH/home.nix" ; }
+      ehome() { zed "$NIX_HOME_PATH" ; }
 
       codedir() { EDITOR="zed --wait" , vidir "$@"; }
 
@@ -324,105 +325,6 @@ in
 
       rename-diff() {
         git diff -M20 --color-moved=dimmed-zebra --color-moved-ws=ignore-all-space $@
-      }
-
-      # cw <branch> [prompt]
-      # Opens a new tmux window running a fresh claude session in a git worktree on <branch>.
-      cw() {
-        local branch="$1"
-        local prompt="$2"
-
-        if [ -z "$branch" ]; then
-          echo "usage: cw <branch> [prompt]" >&2
-          return 1
-        fi
-
-        # Window name: default to the branch name, but for branches shaped like
-        # colton/act-123-whatever, use the ticket id (ACT-123) instead.
-        local window="$branch"
-        if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
-          window="$(echo "''${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
-        fi
-
-        # Resolve worktree location and repo root.
-        local repo_root worktree
-        repo_root="$(git rev-parse --show-toplevel)" || return 1
-        worktree="$repo_root/../$(basename "$repo_root")-worktrees/$window"
-
-        # Fetch so we know whether the branch exists on origin, and so we base
-        # new branches on the latest trunk.
-        git fetch origin --quiet
-
-        if git show-ref --verify --quiet "refs/heads/$branch" ||
-           git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-          # Branch already exists: pull it from origin and check it out in the worktree.
-          git fetch origin "$branch:$branch" 2>/dev/null || git branch -f "$branch" "origin/$branch"
-          git worktree add "$worktree" "$branch" || return 1
-        else
-          # New branch, always based on the latest trunk. Determine the remote's
-          # default branch name (main, trunk, master, ...) rather than assuming.
-          local trunk
-          trunk="$(git stack trunk)"
-          if [ -z "$trunk" ]; then
-            echo "cw: could not determine origin's default branch" >&2
-            return 1
-          fi
-          git worktree add -b "$branch" "$worktree" "$trunk" || return 1
-        fi
-
-        # Open a new tmux window with an empty shell, then type the claude command
-        # into it — when claude exits you're back at the shell, so the pane stays.
-        local win_id cmd
-        win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
-        cmd="claude"
-        [ -n "$prompt" ] && cmd="claude $(printf '%q' "$prompt")"
-        tmux send-keys -t "$win_id.0" "$cmd" Enter
-        tmux split-window -v -t "$win_id" -c "$worktree"
-        tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-        tmux send-keys -t "$win_id.1" 'pnpm install --frozen-lockfile && doppler setup --no-interactive && cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json && cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json && echo "run close-cw to remove this worktree and close the window"' Enter
-        tmux select-pane -t "$win_id.0"
-      }
-
-      # close-cw [-f|--force]
-      # Tears down the current cw worktree: removes the git worktree and closes
-      # its tmux window (both panes). Run it from the second pane of a cw window.
-      # Without --force, git refuses if the worktree has uncommitted or untracked
-      # changes, so you don't lose work by accident.
-      close-cw() {
-        local force=""
-        if [ "$1" = "-f" ] || [ "$1" = "--force" ]; then
-          force="--force"
-        fi
-
-        local worktree worktree_root main_root
-        worktree="$(git rev-parse --show-toplevel)" || return 1
-
-        # Only operate on cw worktrees (those living under <repo>-worktrees).
-        worktree_root="$(basename "$(realpath "$worktree/..")")"
-        if [[ "$worktree_root" != *-worktrees ]]; then
-          echo "close-cw: not inside a cw worktree" >&2
-          return 1
-        fi
-
-        # Find the main working tree so we can run git from outside the worktree
-        # we're about to remove.
-        main_root="$(git worktree list | awk 'NR==1{print $1}')"
-
-        # Capture the current tmux window before we move away.
-        local win_id
-        win_id="$(tmux display-message -p '#{window_id}' 2>/dev/null)"
-
-        # Step out of the worktree so removing its directory is safe.
-        cd "$main_root" || return 1
-
-        if ! git -C "$main_root" worktree remove $force "$worktree"; then
-          echo "close-cw: worktree not removed (pass --force to discard changes)" >&2
-          cd "$worktree" 2>/dev/null
-          return 1
-        fi
-
-        # Close the tmux window (both panes) if we're inside tmux.
-        [ -n "$win_id" ] && tmux kill-window -t "$win_id"
       }
 
       gwrma() {
