@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# mac-notify — post a macOS Notification Center banner from the command line.
+# cnotify — post a macOS Notification Center banner from the command line.
 #
 # A thin, reusable wrapper around osascript's `display notification`, safe to
 # call with arbitrary text: the message/title/subtitle are passed to AppleScript
@@ -8,9 +8,9 @@
 # source, so quotes/backslashes in the text can't break or inject AppleScript.
 #
 # Usage:
-#   mac-notify <message> [title] [subtitle]
-#   mac-notify -s <sound> <message> [title] [subtitle]
-#   echo "message" | mac-notify            # message from stdin if no args
+#   cnotify <message> [title] [subtitle]
+#   cnotify -s <sound> <message> [title] [subtitle]
+#   echo "message" | cnotify            # message from stdin if no args
 #
 # Options:
 #   -s, --sound <name>   Notification sound (e.g. Glass, Ping, Hero, Submarine).
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
     -t|--title)  title="${2:-}"; shift 2 ;;
     -h|--help)   usage; exit 0 ;;
     --)          shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done; break ;;
-    -*)          echo "mac-notify: unknown option: $1" >&2; usage; exit 1 ;;
+    -*)          echo "cnotify: unknown option: $1" >&2; usage; exit 1 ;;
     *)           positional+=("$1"); shift ;;
   esac
 done
@@ -56,13 +56,13 @@ if [ -z "$message" ] && [ ! -t 0 ]; then
 fi
 
 if [ -z "$message" ]; then
-  echo "mac-notify: no message" >&2
+  echo "cnotify: no message" >&2
   usage
   exit 1
 fi
 
 if ! command -v osascript >/dev/null 2>&1; then
-  echo "mac-notify: osascript not found (not macOS?); skipping: $message" >&2
+  echo "cnotify: osascript not found (not macOS?); skipping: $message" >&2
   exit 0
 fi
 
@@ -88,4 +88,4 @@ osascript \
   -e '    display notification msg with title ttl' \
   -e '  end if' \
   -e 'end if' \
-  2>/dev/null || echo "mac-notify: failed to post notification: $message" >&2
+  2>/dev/null || echo "cnotify: failed to post notification: $message" >&2

@@ -162,9 +162,9 @@ cw_oneshot_run() {
   # effectively never failing, this is the pipeline body's status.
 
   if [ "$status" -eq 0 ]; then
-    mac-notify -s Glass "$branch finished" "cw one-shot" || true
+    cnotify -s Glass "$branch finished" "cw one-shot" || true
   else
-    mac-notify -s Basso "$branch failed (exit $status)" "cw one-shot" || true
+    cnotify -s Basso "$branch failed (exit $status)" "cw one-shot" || true
   fi
   cw_close
 }
