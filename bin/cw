@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -euxo pipefail
 
 # Where one-shot runs write their durable logs (NOT /tmp — kept around so a
 # finished run can be looked up later). Override with CW_LOG_DIR.
 CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
-
-# Flags handed to `claude` in --one-shot mode. Unattended runs can't answer
-# permission prompts, so skip them by default. Override with CW_ONESHOT_CLAUDE_FLAGS.
-CW_ONESHOT_CLAUDE_FLAGS="${CW_ONESHOT_CLAUDE_FLAGS:---dangerously-skip-permissions}"
 
 # cw install
 # Prepares a fresh worktree before claude can work in it: installs deps, runs
@@ -23,7 +19,9 @@ cw_install() {
   local clasp
   for clasp in gs-addin slides-addin; do
     local src="$HOME/code/monorepo/apps/$clasp/.clasp.json"
-    [ -f "$src" ] && cp "$src" "apps/$clasp/.clasp.json"
+    if [ -f "$src" ] ; then
+      cp "$src" "apps/$clasp/.clasp.json"
+    fi
   done
 }
 
@@ -91,7 +89,7 @@ cw() {
     echo "cw: one-shot logging to $log"
 
     local oneshot
-    oneshot="{ git stack parent '$trunk' && cw install && claude $CW_ONESHOT_CLAUDE_FLAGS -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
+    oneshot="{ git stack parent '$trunk' && cw install && claude -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
 
     local win_id
     win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
@@ -131,19 +129,22 @@ cw_close() {
     force="--force"
   fi
 
-  local worktree worktree_root main_root
+  local worktree main_root worktrees_base
   worktree="$(git rev-parse --show-toplevel)" || return 1
-
-  # Only operate on cw worktrees (those living under <repo>-worktrees).
-  worktree_root="$(basename "$(realpath "$worktree/..")")"
-  if [[ "$worktree_root" != *-worktrees ]]; then
-    echo "cw_close: not inside a cw worktree" >&2
-    return 1
-  fi
 
   # Find the main working tree so we can run git from outside the worktree
   # we're about to remove.
   main_root="$(git worktree list | awk 'NR==1{print $1}')"
+
+  # Only operate on cw worktrees: those living somewhere under <repo>-worktrees,
+  # next to the main tree. Branch names with slashes (e.g. chore/foo) nest into
+  # subdirs, so match anywhere under the base, not just a direct child. The
+  # first test also refuses to run in the main tree itself.
+  worktrees_base="$(dirname "$main_root")/$(basename "$main_root")-worktrees"
+  if [ "$worktree" = "$main_root" ] || [[ "$worktree"/ != "$worktrees_base"/* ]]; then
+    echo "cw_close: not inside a cw worktree" >&2
+    return 1
+  fi
 
   # Capture the current tmux window before we move away.
   local win_id
