@@ -175,7 +175,7 @@ cw_oneshot_run() {
 # One-shot code review: spins up the worktree, runs the review headless, tears down.
 cw_review() {
   local branch="${1:-}"
-  cw_oneshot "$branch" "/code-review max --comment"
+  cw "$branch" "/code-review max --comment"
 }
 
 # cw close [-f|--force]
