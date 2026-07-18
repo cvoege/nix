@@ -89,7 +89,7 @@ cw() {
     echo "cw: one-shot logging to $log"
 
     local oneshot
-    oneshot="{ git stack parent '$trunk' && cw install && echo \"Starting claude...\" && claude -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
+    oneshot="{ git stack parent '$trunk' && cw install && echo \"Starting claude...\" && claude --permission-mode auto -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
 
     local win_id
     win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
@@ -103,7 +103,7 @@ cw() {
   local win_id cmd
   win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
   cmd="claude"
-  [ -n "$prompt" ] && cmd="claude $(printf '%q' "$prompt")"
+  [ -n "$prompt" ] && cmd="claude --permission-mode auto $(printf '%q' "$prompt")"
   tmux send-keys -t "$win_id.0" "$cmd" Enter
   tmux split-window -v -t "$win_id" -c "$worktree"
   tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
