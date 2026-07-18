@@ -93,7 +93,6 @@ cw() {
     echo "cw: one-shot logging to $log"
 
     local oneshot
-    local oneshot
     oneshot="{ git stack parent '$trunk'"
     oneshot+=" && echo \"Starting $(printf '%q' "$branch")\""
     oneshot+=" && date"
