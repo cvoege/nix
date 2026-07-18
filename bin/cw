@@ -9,9 +9,8 @@ CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 # cw install
 # Prepares a fresh worktree before claude can work in it: installs deps, runs
 # doppler setup, and copies in the clasp configs that aren't checked in. Shared
-# by the normal (second-pane) and --one-shot (inline) modes so they never
-# diverge — both invoke it as `cw install` in the worktree. The && chain keeps
-# the original fail-fast behaviour regardless of the caller's `set -e` state.
+# by both open modes so they never diverge: normal mode runs `cw install` in the
+# setup pane, while one-shot calls cw_install directly.
 cw_install() {
   pnpm install --frozen-lockfile --prefer-offline || return
   doppler setup --no-interactive || true
@@ -25,36 +24,23 @@ cw_install() {
   done
 }
 
-# cw <branch> [prompt]
-# Opens a new tmux window running a fresh claude session in a git worktree on <branch>.
-#
-# With ONE_SHOT=1 (set via the --one-shot flag) it instead runs setup + a
-# headless `claude -p <prompt>` in a single pane, tees all output to a durable
-# log under $CW_LOG_DIR, then tears the worktree/window down via `cw --close`.
-cw() {
-  local branch="${1:-}"
-  local prompt="${2:-}"
-  local one_shot="${ONE_SHOT:-0}"
-
-  if [ -z "$branch" ]; then
-    echo "usage: cw <branch> [prompt]" >&2
-    return 1
-  fi
-
-  if [ "$one_shot" = "1" ] && [ -z "$prompt" ]; then
-    echo "cw: --one-shot requires a prompt" >&2
-    return 1
-  fi
+# _cw_prepare <branch>
+# Shared setup for both open modes: computes the tmux window name and worktree
+# path for <branch>, fetches origin, resolves trunk, and creates or checks out
+# the worktree. Sets the caller's window/worktree/trunk locals — declare them
+# `local` before calling.
+_cw_prepare() {
+  local branch="$1"
 
   # Window name: default to the branch name, but for branches shaped like
   # colton/act-123-whatever, use the ticket id (ACT-123) instead.
-  local window="$branch"
+  window="$branch"
   if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
     window="$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
   fi
 
   # Resolve worktree location and repo root.
-  local repo_root worktree
+  local repo_root
   repo_root="$(git rev-parse --show-toplevel)" || return 1
   worktree="$repo_root/../$(basename "$repo_root")-worktrees/$window"
 
@@ -63,7 +49,6 @@ cw() {
   git fetch origin --quiet
 
   # trunk is needed both for basing new branches and for `git stack parent`.
-  local trunk
   trunk="$(git stack trunk)"
   if [ -z "$trunk" ]; then
     echo "cw: could not determine origin's default branch" >&2
@@ -79,52 +64,86 @@ cw() {
     # New branch, always based on the latest trunk.
     git worktree add -b "$branch" "$worktree" "$trunk" || return 1
   fi
+}
 
-  if [ "$one_shot" = "1" ]; then
-    # One-shot: everything runs in a single pane and the worktree tears itself
-    # down when claude exits. Setup + claude output is tee'd to a durable log.
-    mkdir -p "$CW_LOG_DIR"
-    # Flatten slashes: branches like chore/foo keep their slash in $window
-    # (only ticket-shaped branches get rewritten to ACT-123), and a slash in
-    # the filename would point tee at a nonexistent subdir under $CW_LOG_DIR,
-    # so it writes nothing.
-    local log
-    log="$CW_LOG_DIR/${window//\//-}-$(date +%Y%m%d-%H%M%S).log"
-    echo "cw: one-shot logging to $log"
+# cw <branch> [prompt]
+# Opens a new tmux window running a fresh interactive claude session in a git
+# worktree on <branch>, with a second pane for setup. For a headless, logged run
+# that tears itself down, see `cw oneshot`.
+cw() {
+  local branch="${1:-}"
+  local prompt="${2:-}"
 
-    # Ship only a short invocation to the pane; the actual pipeline lives in
-    # cw_oneshot so it can be written as normal bash. printf %q quotes the args
-    # for the trip through the pane's shell.
-    local win_id
-    win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
-    tmux send-keys -t "$win_id.0" \
-      "$(printf 'cw __oneshot %q %q %q %q' "$branch" "$prompt" "$log" "$trunk")" Enter
-    return 0
-  else
-    # Normal mode: open a new tmux window with an empty shell, then type the
-    # claude command into it — when claude exits you're back at the shell, so the
-    # pane stays. A second pane handles setup.
-    local win_id cmd
-    win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
-    cmd="claude"
-    [ -n "$prompt" ] && cmd="claude --permission-mode auto $(printf '%q' "$prompt")"
-    tmux send-keys -t "$win_id.0" "$cmd" Enter
-    tmux split-window -v -t "$win_id" -c "$worktree"
-    tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-    tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
-    tmux select-pane -t "$win_id.0"
+  if [ -z "$branch" ]; then
+    echo "usage: cw <branch> [prompt]" >&2
+    return 1
   fi
+
+  local window worktree trunk
+  _cw_prepare "$branch" || return 1
+
+  # Open a new tmux window with an empty shell, then type the claude command
+  # into it — when claude exits you're back at the shell, so the pane stays. A
+  # second pane handles setup.
+  local win_id cmd
+  win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
+  cmd="claude"
+  [ -n "$prompt" ] && cmd="claude --permission-mode auto $(printf '%q' "$prompt")"
+  tmux send-keys -t "$win_id.0" "$cmd" Enter
+  tmux split-window -v -t "$win_id" -c "$worktree"
+  tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
+  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
+  tmux select-pane -t "$win_id.0"
+}
+
+# cw oneshot <branch> <prompt>
+# Headless one-shot: sets up the worktree, then runs setup + `claude -p <prompt>`
+# in a single pane, tees all output to a durable log under $CW_LOG_DIR, and tears
+# the worktree/window down when claude exits. The pane runs `cw __oneshot`
+# (cw_oneshot_run) to do the actual work.
+cw_oneshot() {
+  local branch="${1:-}"
+  local prompt="${2:-}"
+
+  if [ -z "$branch" ]; then
+    echo "usage: cw oneshot <branch> <prompt>" >&2
+    return 1
+  fi
+  if [ -z "$prompt" ]; then
+    echo "cw: oneshot requires a prompt" >&2
+    return 1
+  fi
+
+  local window worktree trunk
+  _cw_prepare "$branch" || return 1
+
+  mkdir -p "$CW_LOG_DIR"
+  # Flatten slashes: branches like chore/foo keep their slash in $window
+  # (only ticket-shaped branches get rewritten to ACT-123), and a slash in
+  # the filename would point tee at a nonexistent subdir under $CW_LOG_DIR,
+  # so it writes nothing.
+  local log
+  log="$CW_LOG_DIR/${window//\//-}-$(date +%Y%m%d-%H%M%S).log"
+  echo "cw: one-shot logging to $log"
+
+  # Ship only a short invocation to the pane; the actual pipeline lives in
+  # cw_oneshot_run so it can be written as normal bash. printf %q quotes the
+  # args for the trip through the pane's shell.
+  local win_id
+  win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
+  tmux send-keys -t "$win_id.0" \
+    "$(printf 'cw __oneshot %q %q %q %q' "$branch" "$prompt" "$log" "$trunk")" Enter
 }
 
 # cw __oneshot <branch> <prompt> <log> <trunk>
-# Internal: runs inside the one-shot pane created by `cw`. Not part of the
-# public interface (not in usage()). Runs setup + headless claude, tees all
+# Internal: runs inside the one-shot pane created by `cw oneshot`. Not part of
+# the public interface (not in usage()). Runs setup + headless claude, tees all
 # output to the durable log, then tears the worktree/window down.
 #
 # NB: call cw_install / cw_close directly, NOT `cw install` / `cw close`. This
 # runs in-process where `cw` resolves to the window-opening shell function, not
 # the dispatcher — `cw install` would spawn a stray normal window.
-cw_oneshot() {
+cw_oneshot_run() {
   local branch="$1" prompt="$2" log="$3" trunk="$4"
   {
     git stack parent "$trunk" &&
@@ -143,7 +162,7 @@ cw_oneshot() {
 # One-shot code review: spins up the worktree, runs the review headless, tears down.
 cw_review() {
   local branch="${1:-}"
-  ONE_SHOT=1 cw "$branch" "/code-review max --comment"
+  cw_oneshot "$branch" "/code-review max --comment"
 }
 
 # cw close [-f|--force]
@@ -195,7 +214,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   cw <branch> [prompt]            open a worktree + interactive claude in tmux
-  cw <branch> <prompt> --one-shot run claude headless, log output, auto-close
+  cw oneshot <branch> <prompt>    run claude headless, log output, auto-close
   cw review <branch>              one-shot code review of <branch>
   cw close [-f|--force]           tear down the current cw worktree + window
   cw install                      prepare the current worktree (deps + configs)
@@ -208,15 +227,14 @@ EOF
 main() {
   local action="cw"
   local -a positional=()
-  export ONE_SHOT=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
+      oneshot)     action="oneshot" ;;
       close)       action="close" ;;
       review)      action="review" ;;
       install)     action="install" ;;
       __oneshot)   action="__oneshot" ;;
-      --one-shot)  ONE_SHOT=1 ;;
       -f|--force)  positional+=("$1") ;;
       -h|--help)   usage; return 0 ;;
       --)          shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done; break ;;
