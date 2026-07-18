@@ -94,6 +94,7 @@ in
     # See ./bin/*; ~/.bin is already on PATH (set in programs.bash.initExtra).
     ".bin/git-stack" = { source = ./bin/git-stack; executable = true; };
     ".bin/cw" = { source = ./bin/cw; executable = true; };
+    ".bin/mac-notify" = { source = ./bin/mac-notify; executable = true; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a

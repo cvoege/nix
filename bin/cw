@@ -145,6 +145,7 @@ cw_oneshot() {
 # the dispatcher — `cw install` would spawn a stray normal window.
 cw_oneshot_run() {
   local branch="$1" prompt="$2" log="$3" trunk="$4"
+  local status=0
   {
     git stack parent "$trunk" &&
     echo "Starting $branch" &&
@@ -154,7 +155,17 @@ cw_oneshot_run() {
     claude --output-format stream-json --verbose --permission-mode auto -p "$prompt" &&
     echo "Finishing $branch" &&
     date
-  } 2>&1 | tee "$log" || true
+  } 2>&1 | tee "$log" || status=$?
+  # `|| status=$?` does double duty: it stops `set -e` from killing the script
+  # the instant claude/setup fails (which would skip the notify + teardown
+  # below), and captures the failing exit code. With `pipefail` on and tee
+  # effectively never failing, this is the pipeline body's status.
+
+  if [ "$status" -eq 0 ]; then
+    mac-notify -s Glass "$branch finished" "cw one-shot" || true
+  else
+    mac-notify -s Basso "$branch failed (exit $status)" "cw one-shot" || true
+  fi
   cw_close
 }
 
