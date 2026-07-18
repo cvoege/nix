@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 #
-# cnotify — post a macOS Notification Center banner from the command line.
+# cnotify — post a desktop notification banner from the command line.
 #
-# A thin, reusable wrapper around osascript's `display notification`, safe to
-# call with arbitrary text: the message/title/subtitle are passed to AppleScript
-# as env vars (via `system attribute`) rather than interpolated into the script
-# source, so quotes/backslashes in the text can't break or inject AppleScript.
+# On macOS this is a thin, reusable wrapper around osascript's `display
+# notification`, safe to call with arbitrary text: the message/title/subtitle
+# are passed to AppleScript as env vars (via `system attribute`) rather than
+# interpolated into the script source, so quotes/backslashes in the text can't
+# break or inject AppleScript.
+#
+# On Linux it falls back to `notify-send` (libnotify), and if no notification
+# daemon is available it rings the terminal bell and echoes the text to stderr.
 #
 # Usage:
 #   cnotify <message> [title] [subtitle]
@@ -18,9 +22,9 @@
 #   -t, --title <text>   Title (overrides positional title).
 #   -h, --help           Show this help.
 #
-# Exits 0 on success. If not on macOS / osascript is missing, prints a warning
-# to stderr and exits 0 anyway — a missing notification should never fail a
-# caller's pipeline.
+# Exits 0 on success. If no notifier is available, prints a warning to stderr
+# and exits 0 anyway — a missing notification should never fail a caller's
+# pipeline.
 
 set -euo pipefail
 
@@ -30,7 +34,7 @@ subtitle=""
 message=""
 
 usage() {
-  sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 # --- args -----------------------------------------------------------------
@@ -61,31 +65,62 @@ if [ -z "$message" ]; then
   exit 1
 fi
 
-if ! command -v osascript >/dev/null 2>&1; then
-  echo "cnotify: osascript not found (not macOS?); skipping: $message" >&2
+# --- macOS: osascript / Notification Center --------------------------------
+if command -v osascript >/dev/null 2>&1; then
+  # Pass text through the environment so AppleScript reads it with `system
+  # attribute` — never string-interpolated into the script, so no escaping or
+  # injection concerns regardless of what the text contains.
+  MN_MSG="$message" MN_TITLE="$title" MN_SUB="$subtitle" MN_SOUND="$sound" \
+  osascript \
+    -e 'set msg to (system attribute "MN_MSG")' \
+    -e 'set ttl to (system attribute "MN_TITLE")' \
+    -e 'set sub to (system attribute "MN_SUB")' \
+    -e 'set snd to (system attribute "MN_SOUND")' \
+    -e 'if sub is not "" then' \
+    -e '  if snd is not "" and snd is not "none" then' \
+    -e '    display notification msg with title ttl subtitle sub sound name snd' \
+    -e '  else' \
+    -e '    display notification msg with title ttl subtitle sub' \
+    -e '  end if' \
+    -e 'else' \
+    -e '  if snd is not "" and snd is not "none" then' \
+    -e '    display notification msg with title ttl sound name snd' \
+    -e '  else' \
+    -e '    display notification msg with title ttl' \
+    -e '  end if' \
+    -e 'end if' \
+    2>/dev/null || echo "cnotify: failed to post notification: $message" >&2
   exit 0
 fi
 
-# Pass text through the environment so AppleScript reads it with `system
-# attribute` — never string-interpolated into the script, so no escaping or
-# injection concerns regardless of what the text contains.
-MN_MSG="$message" MN_TITLE="$title" MN_SUB="$subtitle" MN_SOUND="$sound" \
-osascript \
-  -e 'set msg to (system attribute "MN_MSG")' \
-  -e 'set ttl to (system attribute "MN_TITLE")' \
-  -e 'set sub to (system attribute "MN_SUB")' \
-  -e 'set snd to (system attribute "MN_SOUND")' \
-  -e 'if sub is not "" then' \
-  -e '  if snd is not "" and snd is not "none" then' \
-  -e '    display notification msg with title ttl subtitle sub sound name snd' \
-  -e '  else' \
-  -e '    display notification msg with title ttl subtitle sub' \
-  -e '  end if' \
-  -e 'else' \
-  -e '  if snd is not "" and snd is not "none" then' \
-  -e '    display notification msg with title ttl sound name snd' \
-  -e '  else' \
-  -e '    display notification msg with title ttl' \
-  -e '  end if' \
-  -e 'end if' \
-  2>/dev/null || echo "cnotify: failed to post notification: $message" >&2
+# --- Linux: notify-send (libnotify) ----------------------------------------
+# A reasonable equivalent to Notification Center. Subtitle isn't a distinct
+# libnotify concept, so it's folded into the body. Sound isn't portable via
+# notify-send, so we ring the terminal bell (below) as an audible cue when a
+# sound was requested.
+if command -v notify-send >/dev/null 2>&1; then
+  body="$message"
+  [ -n "$subtitle" ] && body="$subtitle"$'\n'"$message"
+  notify-send -- "$title" "$body" 2>/dev/null \
+    || echo "cnotify: failed to post notification: $message" >&2
+  if [ -n "$sound" ] && [ "$sound" != "none" ]; then
+    # Prefer a real sound player if present, otherwise the terminal bell.
+    if command -v canberra-gtk-play >/dev/null 2>&1; then
+      canberra-gtk-play -i message >/dev/null 2>&1 || printf '\a' >&2
+    elif command -v paplay >/dev/null 2>&1 \
+         && [ -f /usr/share/sounds/freedesktop/stereo/message.oga ]; then
+      paplay /usr/share/sounds/freedesktop/stereo/message.oga >/dev/null 2>&1 \
+        || printf '\a' >&2
+    else
+      printf '\a' >&2
+    fi
+  fi
+  exit 0
+fi
+
+# --- Fallback: terminal bell + stderr --------------------------------------
+# No notification daemon available (headless, minimal container, etc.). Ring
+# the bell and echo the text so the message isn't lost, but never fail.
+echo "cnotify: no notifier found; message: ${title}: ${message}" >&2
+[ -n "$sound" ] && [ "$sound" != "none" ] && printf '\a' >&2
+exit 0
