@@ -100,20 +100,20 @@ cw() {
     tmux send-keys -t "$win_id.0" \
       "$(printf 'cw __oneshot %q %q %q %q' "$branch" "$prompt" "$log" "$trunk")" Enter
     return 0
+  else
+    # Normal mode: open a new tmux window with an empty shell, then type the
+    # claude command into it — when claude exits you're back at the shell, so the
+    # pane stays. A second pane handles setup.
+    local win_id cmd
+    win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
+    cmd="claude"
+    [ -n "$prompt" ] && cmd="claude --permission-mode auto $(printf '%q' "$prompt")"
+    tmux send-keys -t "$win_id.0" "$cmd" Enter
+    tmux split-window -v -t "$win_id" -c "$worktree"
+    tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
+    tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
+    tmux select-pane -t "$win_id.0"
   fi
-
-  # Normal mode: open a new tmux window with an empty shell, then type the
-  # claude command into it — when claude exits you're back at the shell, so the
-  # pane stays. A second pane handles setup.
-  local win_id cmd
-  win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
-  cmd="claude"
-  [ -n "$prompt" ] && cmd="claude --permission-mode auto $(printf '%q' "$prompt")"
-  tmux send-keys -t "$win_id.0" "$cmd" Enter
-  tmux split-window -v -t "$win_id" -c "$worktree"
-  tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
-  tmux select-pane -t "$win_id.0"
 }
 
 # cw __oneshot <branch> <prompt> <log> <trunk>
