@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euxo pipefail
+set -euo pipefail
 
 # Where one-shot runs write their durable logs (NOT /tmp — kept around so a
 # finished run can be looked up later). Override with CW_LOG_DIR.
@@ -93,7 +93,18 @@ cw() {
     echo "cw: one-shot logging to $log"
 
     local oneshot
-    oneshot="{ git stack parent '$trunk' && cw install && echo \"Starting claude...\" && claude --output-format stream-json --verbose --permission-mode auto -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
+    local oneshot
+    oneshot="{ git stack parent '$trunk'"
+    oneshot+=" && echo \"Starting $(printf '%q' "$branch")\""
+    oneshot+=" && date"
+    oneshot+=" && cw install"
+    oneshot+=" && echo \"Starting claude...\""
+    oneshot+=" && claude --output-format stream-json --verbose --permission-mode auto -p $(printf '%q' "$prompt")"
+    oneshot+=" && echo \"Finishing $(printf '%q' "$branch")\""
+    oneshot+=" && date"
+    oneshot+=" ; } 2>&1 | tee $(printf '%q' "$log")"
+    oneshot+=" ; cw close"
+
 
     local win_id
     win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
