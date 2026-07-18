@@ -18,7 +18,7 @@ CW_ONESHOT_CLAUDE_FLAGS="${CW_ONESHOT_CLAUDE_FLAGS:---dangerously-skip-permissio
 # the original fail-fast behaviour regardless of the caller's `set -e` state.
 cw_install() {
   pnpm install --frozen-lockfile || return
-  doppler setup --no-interactive || return
+  doppler setup --no-interactive || true
 
   local clasp
   for clasp in gs-addin slides-addin; do
