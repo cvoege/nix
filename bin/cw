@@ -119,20 +119,24 @@ cw() {
 # cw __oneshot <branch> <prompt> <log> <trunk>
 # Internal: runs inside the one-shot pane created by `cw`. Not part of the
 # public interface (not in usage()). Runs setup + headless claude, tees all
-# output to the durable log, then tears the worktree/window down via `cw close`.
+# output to the durable log, then tears the worktree/window down.
+#
+# NB: call cw_install / cw_close directly, NOT `cw install` / `cw close`. This
+# runs in-process where `cw` resolves to the window-opening shell function, not
+# the dispatcher — `cw install` would spawn a stray normal window.
 cw_oneshot() {
   local branch="$1" prompt="$2" log="$3" trunk="$4"
   {
     git stack parent "$trunk" &&
     echo "Starting $branch" &&
     date &&
-    cw install &&
+    cw_install &&
     echo "Starting claude..." &&
     claude --output-format stream-json --verbose --permission-mode auto -p "$prompt" &&
     echo "Finishing $branch" &&
     date
   } 2>&1 | tee "$log" || true
-  cw close
+  cw_close
 }
 
 # cw review <branch>
