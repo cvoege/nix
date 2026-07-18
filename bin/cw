@@ -172,10 +172,18 @@ cw_oneshot_run() {
 }
 
 # cw review <branch>
-# One-shot code review: spins up the worktree, runs the review headless, tears down.
+# Code review: opens the worktree + interactive claude running the review.
 cw_review() {
   local branch="${1:-}"
   cw "$branch" "/code-review max --comment"
+}
+
+# cw review-oneshot <branch>
+# One-shot code review: spins up the worktree, runs the review headless, logs
+# the output, and tears the worktree/window down when it finishes.
+cw_review_oneshot() {
+  local branch="${1:-}"
+  cw_oneshot "$branch" "/code-review max --comment"
 }
 
 # cw close [-f|--force]
@@ -228,7 +236,8 @@ usage() {
 usage:
   cw <branch> [prompt]            open a worktree + interactive claude in tmux
   cw oneshot <branch> <prompt>    run claude headless, log output, auto-close
-  cw review <branch>              one-shot code review of <branch>
+  cw review <branch>              open a worktree + interactive code review of <branch>
+  cw review-oneshot <branch>      run a code review headless, log output, auto-close
   cw close [-f|--force]           tear down the current cw worktree + window
   cw install                      prepare the current worktree (deps + configs)
 EOF
@@ -244,8 +253,9 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       oneshot)     action="oneshot" ;;
-      close)       action="close" ;;
-      review)      action="review" ;;
+      close)          action="close" ;;
+      review)         action="review" ;;
+      review-oneshot) action="review-oneshot" ;;
       install)     action="install" ;;
       __oneshot)   action="__oneshot" ;;
       -f|--force)  positional+=("$1") ;;
@@ -261,6 +271,7 @@ main() {
     oneshot)   cw_oneshot ${positional[@]+"${positional[@]}"} ;;
     close)     cw_close ${positional[@]+"${positional[@]}"} ;;
     review)    cw_review ${positional[@]+"${positional[@]}"} ;;
+    review-oneshot) cw_review_oneshot ${positional[@]+"${positional[@]}"} ;;
     install)   cw_install ;;
     __oneshot) cw_oneshot_run ${positional[@]+"${positional[@]}"} ;;
     cw)        cw ${positional[@]+"${positional[@]}"} ;;
