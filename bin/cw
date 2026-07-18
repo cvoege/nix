@@ -245,10 +245,11 @@ main() {
   done
 
   case "$action" in
+    oneshot)   cw_oneshot ${positional[@]+"${positional[@]}"} ;;
     close)     cw_close ${positional[@]+"${positional[@]}"} ;;
     review)    cw_review ${positional[@]+"${positional[@]}"} ;;
     install)   cw_install ;;
-    __oneshot) cw_oneshot ${positional[@]+"${positional[@]}"} ;;
+    __oneshot) cw_oneshot_run ${positional[@]+"${positional[@]}"} ;;
     cw)        cw ${positional[@]+"${positional[@]}"} ;;
   esac
 }
