@@ -13,7 +13,16 @@ CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 # diverge — both invoke it as `cw install` in the worktree. The && chain keeps
 # the original fail-fast behaviour regardless of the caller's `set -e` state.
 cw_install() {
-  pnpm install --frozen-lockfile || return
+  # Seed node_modules from the primary checkout via an APFS copy-on-write clone
+  # so pnpm reconciles a small delta instead of linking ~3.6G from scratch. The
+  # clone is near-instant and shares disk blocks (COW). Must use /bin/cp: the
+  # GNU coreutils cp on PATH lacks the -c (clonefile) flag. With the repo's
+  # optimisticRepeatInstall, a matching tree makes the install a fast verify.
+  local main_nm="$HOME/code/monorepo/node_modules"
+  if [ ! -e node_modules ] && [ -d "$main_nm" ]; then
+    /bin/cp -cR "$main_nm" node_modules || rm -rf node_modules
+  fi
+  pnpm install --frozen-lockfile --prefer-offline || return
   doppler setup --no-interactive || true
 
   local clasp

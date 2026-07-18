@@ -132,6 +132,9 @@ in
       BASH_SILENCE_DEPRECATION_WARNING = "1";
       USE_GKE_GCLOUD_AUTH_PLUGIN = "True";
       DO_NOT_TRACK = "1";
+      # Shared turbo filesystem cache so the monorepo and all cw worktrees read
+      # and write one content-addressed pool instead of rebuilding per-worktree.
+      TURBO_CACHE_DIR = "${config.home.homeDirectory}/.cache/turbo/monorepo";
   };
 
   # Let Home Manager install and manage itself.
