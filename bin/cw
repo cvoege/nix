@@ -89,7 +89,7 @@ cw() {
     echo "cw: one-shot logging to $log"
 
     local oneshot
-    oneshot="{ git stack parent '$trunk' && cw install && claude -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
+    oneshot="{ git stack parent '$trunk' && cw install && echo \"Starting claude...\" && claude -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
 
     local win_id
     win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
