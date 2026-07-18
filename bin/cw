@@ -17,10 +17,14 @@ CW_ONESHOT_CLAUDE_FLAGS="${CW_ONESHOT_CLAUDE_FLAGS:---dangerously-skip-permissio
 # diverge — both invoke it as `cw install` in the worktree. The && chain keeps
 # the original fail-fast behaviour regardless of the caller's `set -e` state.
 cw_install() {
-  pnpm install --frozen-lockfile &&
-    doppler setup --no-interactive &&
-    cp "$HOME/code/monorepo/apps/gs-addin/.clasp.json" apps/gs-addin/.clasp.json &&
-    cp "$HOME/code/monorepo/apps/slides-addin/.clasp.json" apps/slides-addin/.clasp.json
+  pnpm install --frozen-lockfile || return
+  doppler setup --no-interactive || return
+
+  local clasp
+  for clasp in gs-addin slides-addin; do
+    local src="$HOME/code/monorepo/apps/$clasp/.clasp.json"
+    [ -f "$src" ] && cp "$src" "apps/$clasp/.clasp.json"
+  done
 }
 
 # cw <branch> [prompt]
@@ -87,7 +91,7 @@ cw() {
     echo "cw: one-shot logging to $log"
 
     local oneshot
-    oneshot="{ git stack parent '$trunk' && cw install && claude $CW_ONESHOT_CLAUDE_FLAGS -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw --close"
+    oneshot="{ git stack parent '$trunk' && cw install && claude $CW_ONESHOT_CLAUDE_FLAGS -p $(printf '%q' "$prompt") ; } 2>&1 | tee $(printf '%q' "$log") ; cw close"
 
     local win_id
     win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
@@ -105,18 +109,18 @@ cw() {
   tmux send-keys -t "$win_id.0" "$cmd" Enter
   tmux split-window -v -t "$win_id" -c "$worktree"
   tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw --close to remove this worktree and close the window"' Enter
+  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
   tmux select-pane -t "$win_id.0"
 }
 
-# cw_review <branch>
+# cw review <branch>
 # One-shot code review: spins up the worktree, runs the review headless, tears down.
 cw_review() {
   local branch="${1:-}"
   ONE_SHOT=1 cw "$branch" "/code-review max --comment"
 }
 
-# cw_close [-f|--force]
+# cw close [-f|--force]
 # Tears down the current cw worktree: removes the git worktree and closes
 # its tmux window (both panes). Run it from inside a cw window.
 # Without --force, git refuses if the worktree has uncommitted or untracked
@@ -163,8 +167,8 @@ usage() {
 usage:
   cw <branch> [prompt]            open a worktree + interactive claude in tmux
   cw <branch> <prompt> --one-shot run claude headless, log output, auto-close
-  cw --review <branch>            one-shot code review of <branch>
-  cw --close [-f|--force]         tear down the current cw worktree + window
+  cw review <branch>              one-shot code review of <branch>
+  cw close [-f|--force]           tear down the current cw worktree + window
   cw install                      prepare the current worktree (deps + configs)
 EOF
 }
@@ -179,8 +183,8 @@ main() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --close)     action="close" ;;
-      --review)    action="review" ;;
+      close)       action="close" ;;
+      review)      action="review" ;;
       install)     action="install" ;;
       --one-shot)  ONE_SHOT=1 ;;
       -f|--force)  positional+=("$1") ;;
@@ -193,9 +197,10 @@ main() {
   done
 
   case "$action" in
-    close)  cw_close ${positional[@]+"${positional[@]}"} ;;
-    review) cw_review ${positional[@]+"${positional[@]}"} ;;
-    cw)     cw ${positional[@]+"${positional[@]}"} ;;
+    close)   cw_close ${positional[@]+"${positional[@]}"} ;;
+    review)  cw_review ${positional[@]+"${positional[@]}"} ;;
+    install) cw_install ;;
+    cw)      cw ${positional[@]+"${positional[@]}"} ;;
   esac
 }
 
