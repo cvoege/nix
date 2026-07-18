@@ -129,8 +129,10 @@ cw_oneshot() {
   # Ship only a short invocation to the pane; the actual pipeline lives in
   # cw_oneshot_run so it can be written as normal bash. printf %q quotes the
   # args for the trip through the pane's shell.
+  # -d: create the window in the background without switching the client to it,
+  # so a one-shot run doesn't yank focus away from what you're doing.
   local win_id
-  win_id="$(tmux new-window -P -F '#{window_id}' -n "$window" -c "$worktree")"
+  win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
   tmux send-keys -t "$win_id.0" \
     "$(printf 'cw __oneshot %q %q %q %q' "$branch" "$prompt" "$log" "$trunk")" Enter
 }
