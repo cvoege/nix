@@ -38,28 +38,54 @@ ME_EMAIL=$(git config user.email || true)
   || die "git user.name / user.email not set; can't reassign authorship."
 export ME_NAME ME_EMAIL
 
+# --- who counts as a bot ----------------------------------------------------
+# Matched case-insensitively against both an identity ("email name") and against
+# Co-authored-by / footer lines. Covers the popular coding agents: Claude Code,
+# Cursor, GitHub Copilot, OpenAI Codex, Google Jules, Devin, Aider, OpenHands,
+# Roo Code, Sweep, Codegen, Factory Droid, Amazon Q, CodeRabbit, Ellipsis,
+# Charlie, Gemini Code Assist, …
+#
+# Agent-owned email domains + the "+<login>@users.noreply.github.com" bot
+# accounts (numeric prefix ignored — it churns on rename).
+BOT_EMAIL='@anthropic\.com|@openai\.com|@aider\.chat|@cursor\.(com|sh)|@all-hands\.dev|@roocode\.com|@charlielabs\.ai|@coderabbit\.ai|\+(copilot|copilot-swe-agent|chatgpt-codex-connector|google-labs-jules|devin-ai-integration|roomote|roomote-v0|sweep-ai|sweep-ai-deprecated|codegen-sh|factory-droid|amazon-q-developer|coderabbitai|ellipsis-dev|cursor|gemini-code-assist|sourcegraph-cody)(\[bot\])?@users\.noreply\.github\.com|copilot@github\.com'
+# Distinctive agent display names (kept specific so real humans survive).
+BOT_NAME='(^| )claude( |$)|(^| )codex( |$)|(^| )aider( |$)|cursor agent|(^| )cursor( |$)|(^| )copilot( |$)|copilot-swe-agent|google-labs-jules|devin ai|devin-ai-integration|openhands|roo code|roomote|sweep-ai|charliehelps|codegen-sh|factory-droid|amazon-q-developer|coderabbit|ellipsis-dev|gemini-code-assist'
+export BOT_EMAIL BOT_NAME
+
+# perl program that strips bot trailers/footers from one commit message on stdin
+SCRUB_PL=$(mktemp)
+export SCRUB_PL
+trap 'rm -f "$SCRUB_PL"' EXIT
+cat >"$SCRUB_PL" <<'PERL'
+my ($e, $n) = ($ENV{BOT_EMAIL}, $ENV{BOT_NAME});
+local $/; my $m = <STDIN>;
+# trailer lines (co-author, sign-off, made-with, …) naming a bot
+$m =~ s/^[ \t]*(?:Co-authored-by|Signed-off-by|Made-with|Assisted-by|Requested-by|Generated-by):[^\n]*(?:$e|$n)[^\n]*\n//gim;
+# any remaining line carrying a bot email
+$m =~ s/^[^\n]*(?:$e)[^\n]*\n//gim;
+# "Generated with …" advertising footers (their own line, maybe robot-prefixed)
+$m =~ s/^[ \t]*(?:\xF0\x9F\xA4\x96[ \t]*)?Generated with \[?(?:Claude Code|Cursor|Codex|Aider|OpenHands|Devin)[^\n]*\n//gim;
+# leftover robot-emoji line (🤖)
+$m =~ s/^[ \t]*\xF0\x9F\xA4\x96[^\n]*\n//gm;
+$m =~ s/\n{3,}/\n\n/g;   # collapse blank runs left behind
+$m =~ s/\n{2,}\z/\n/;    # trim trailing blanks
+$m =~ s/\A\n+//;         # trim leading blanks
+print $m;
+PERL
+
 # --- rewrite authorship + commit messages -----------------------------------
 export FILTER_BRANCH_SQUELCH_WARNING=1
 git filter-branch --force \
   --env-filter '
-    bot="@anthropic\.com|@cursor\.(com|sh)|(^| )claude( |$)|(^| )cursor( agent)?( |$)|cursor\[bot\]"
-    if printf "%s" "$GIT_AUTHOR_EMAIL $GIT_AUTHOR_NAME" | grep -qiE "$bot"; then
+    if printf "%s" "$GIT_AUTHOR_EMAIL $GIT_AUTHOR_NAME" | grep -qiE "$BOT_EMAIL|$BOT_NAME"; then
       export GIT_AUTHOR_NAME="$ME_NAME" GIT_AUTHOR_EMAIL="$ME_EMAIL"
     fi
-    if printf "%s" "$GIT_COMMITTER_EMAIL $GIT_COMMITTER_NAME" | grep -qiE "$bot"; then
+    if printf "%s" "$GIT_COMMITTER_EMAIL $GIT_COMMITTER_NAME" | grep -qiE "$BOT_EMAIL|$BOT_NAME"; then
       export GIT_COMMITTER_NAME="$ME_NAME" GIT_COMMITTER_EMAIL="$ME_EMAIL"
     fi
   ' \
-  --msg-filter '
-  perl -0777 -pe "
-    s/^.*<[^>]*\@(anthropic\.com|cursor\.(com|sh))>.*\n//gim;
-    s/^[ \t]*Co-authored-by:.*(claude|cursor).*\n//gim;
-    s/^.*Generated with \[?(Claude Code|Cursor).*\n//gim;
-    s/^[ \t]*🤖.*\n//gm;
-    s/\n{2,}\z/\n/;
-    s/^\n+//;
-  "
-' -- "$base..HEAD" >/dev/null
+  --msg-filter 'perl "$SCRUB_PL"' \
+  -- "$base..HEAD" >/dev/null
 
 # --- drop the filter-branch backup refs -------------------------------------
 git for-each-ref --format='%(refname)' refs/original/ \
