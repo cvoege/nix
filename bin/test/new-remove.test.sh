@@ -68,3 +68,18 @@ test_remove_rejects_untracked_branch() {
   assert_failure
   assert_stderr_contains "no stack parent recorded"
 }
+
+# git branch -D fails on a branch held by another worktree; remove must refuse
+# up front so it can't reparent children and unset config before that failure.
+test_remove_rejects_branch_in_other_worktree() {
+  make_repo
+  linear_stack a b c                   # trunk <- a <- b <- c
+  git checkout --quiet a               # not on the branch being removed
+  git worktree add --quiet "$SANDBOX/wt-b" b
+  run git stack remove b
+  assert_failure
+  assert_stderr_contains "other worktrees"
+  assert_branch b                      # not deleted
+  assert_parent b a                    # config intact
+  assert_parent c b                    # child NOT reparented onto a
+}

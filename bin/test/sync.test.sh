@@ -136,3 +136,57 @@ test_sync_all_processes_every_stack() {
   assert_branch b
   assert_branch x                    # stack 2 untouched structurally
 }
+
+# --- worktree preflight ---------------------------------------------------
+# A branch checked out in another worktree can be neither deleted (git branch -D)
+# nor rebased (git rebase). sync must bail BEFORE mutating any metadata; the old
+# behaviour reparented-then-failed, collapsing the stack toward trunk.
+
+test_sync_blocked_when_survivor_in_other_worktree() {
+  make_repo
+  linear_stack a b c                 # trunk <- a <- b <- c
+  gh_add_pr a main MERGED
+  gh_add_pr b a OPEN
+  gh_add_pr c b OPEN
+  git checkout --quiet c
+  git worktree add --quiet "$SANDBOX/wt-b" b   # survivor b held elsewhere
+  run git stack sync --offline
+  assert_failure
+  assert_stderr_contains "other worktrees"
+  # nothing mutated: the merged branch survives and every parent pointer is intact
+  assert_branch a
+  assert_parent a main
+  assert_parent b a
+  assert_parent c b
+  assert_no_restack_in_progress
+}
+
+test_sync_blocked_when_merged_branch_in_other_worktree() {
+  make_repo
+  linear_stack a b                   # trunk <- a <- b
+  gh_add_pr a main MERGED
+  gh_add_pr b a OPEN
+  git checkout --quiet b
+  git worktree add --quiet "$SANDBOX/wt-a" a   # the merged branch itself
+  run git stack sync --offline
+  assert_failure
+  assert_stderr_contains "other worktrees"
+  assert_branch a                    # not deleted
+  assert_parent a main               # config not unset (the buggy path cleared it)
+  assert_parent b a                  # b not reparented onto trunk
+}
+
+test_sync_unrelated_worktree_does_not_block() {
+  make_repo
+  linear_stack a b
+  git checkout --quiet main
+  git branch other main
+  git worktree add --quiet "$SANDBOX/wt-o" other   # not part of the stack
+  gh_add_pr a main MERGED
+  gh_add_pr b a OPEN
+  git checkout --quiet b
+  run git stack sync --offline
+  assert_success
+  assert_no_branch a                 # merged branch dropped as usual
+  assert_parent b main
+}

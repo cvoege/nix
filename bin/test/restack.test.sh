@@ -23,6 +23,19 @@ test_restack_squash_collapses_each_branch_to_one_commit() {
   assert_commit_count a main 1
 }
 
+test_restack_rejects_branch_in_other_worktree() {
+  make_repo
+  linear_stack a b                   # trunk <- a <- b
+  git checkout --quiet b
+  local before; before=$(git rev-parse b)
+  git worktree add --quiet "$SANDBOX/wt-a" a   # a can't be rebased from here
+  run git stack restack --offline
+  assert_failure
+  assert_stderr_contains "other worktrees"
+  assert_no_restack_in_progress                # bailed before writing state
+  assert_eq "$(git rev-parse b)" "$before" "b tip unchanged"
+}
+
 test_restack_dry_run_changes_nothing_and_clears_state() {
   make_repo
   linear_stack a b

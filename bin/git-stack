@@ -77,6 +77,40 @@ stack_unset_fork_base() { git config --unset "branch.$1.stackForkBase" 2>/dev/nu
 
 current_branch() { git symbolic-ref --quiet --short HEAD 2>/dev/null || true; }
 
+# Path of a worktree OTHER than the current one that has $1 checked out, if any
+# (empty otherwise). A branch is checked out in at most one worktree, so if it
+# isn't this worktree's branch but shows up in `git worktree list`, that entry
+# is necessarily a different worktree — no path comparison needed.
+branch_worktree() { # branch -> prints worktree path, or nothing
+  local branch="$1"
+  [[ "$branch" == "$(current_branch)" ]] && return 0   # only in the current worktree
+  git worktree list --porcelain 2>/dev/null | awk \
+    -v ref="refs/heads/$branch" '
+    /^worktree /{ wt = substr($0, 10) }
+    $1 == "branch" && $2 == ref { print wt; exit }
+  '
+}
+
+# Fail fast if any listed branch is checked out in another worktree. git refuses
+# both `git branch -D` and `git rebase` on such a branch, so callers must bail
+# BEFORE mutating any stack metadata — otherwise a mid-operation failure leaves
+# the stack half-reparented. $1 is a verb for the message ("sync", "restack", …).
+assert_branches_free() { # verb branch...
+  local verb="$1"; shift
+  local b wt; local -a blocked=()
+  for b in "$@"; do
+    wt=$(branch_worktree "$b")
+    [[ -n "$wt" ]] && blocked+=("$b  ->  $wt")
+  done
+  [[ ${#blocked[@]} -eq 0 ]] && return 0
+  { echo "git-stack: cannot $verb — these branches are checked out in other worktrees:"
+    local x; for x in "${blocked[@]}"; do echo "    $x"; done
+    echo "  git can't delete or rebase a branch another worktree holds. Remove those"
+    echo "  worktrees (git worktree remove <path>) or run from within them, then retry."
+  } >&2
+  exit 1
+}
+
 # All local branches that have a recorded parent.
 # git canonicalises config keys to lowercase (branch.<name>.stackparent), but
 # preserves the case of the <name> subsection; each line is "<key> <value>".
@@ -203,6 +237,9 @@ cmd_remove() {
   local parent; parent=$(stack_parent "$branch")
   [[ -n "$parent" ]] || die "'$branch' has no stack parent recorded (not a tracked stack branch)."
   [[ "$branch" == "$cur" ]] && die "cannot remove the currently checked-out branch; switch away first."
+  # `git branch -D` fails on a branch held by another worktree; check before we
+  # reparent children and unset config, so a failure can't corrupt the metadata.
+  assert_branches_free remove "$branch"
   local child
   while read -r child; do
     [[ -n "$child" ]] || continue
@@ -903,6 +940,10 @@ restack_build_plan() { # writes STATE; echoes nothing
     || die "'$start' is not part of a tracked stack. Set its parent:  git stack parent $trunk"
   stack_check_err "${branches[0]}"
 
+  # A branch checked out in another worktree can't be rebased; stop before the
+  # fast-forward/rebase pass mutates anything.
+  assert_branches_free restack "${branches[@]}"
+
   [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
 
   orig="$start"
@@ -1180,6 +1221,11 @@ cmd_sync() {
     fi
     return 0
   fi
+
+  # Bail before touching any metadata if a branch we'd delete or rebase is held
+  # by another worktree; otherwise cmd_remove would reparent-then-fail and the
+  # restack would abort mid-flight, collapsing the stack toward trunk.
+  assert_branches_free sync "${chain[@]}"
 
   [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first."
 
