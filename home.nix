@@ -304,7 +304,7 @@ in
           MSG="$@"
         fi
         git add -A
-        git commit -nm "$MSG"
+        git commit -m "$MSG"
       }
 
       # ex:
@@ -316,7 +316,7 @@ in
           MSG="$@"
         fi
         git add -A
-        git commit -nm "$MSG"
+        git commit -m "$MSG"
         git put
       }
 
