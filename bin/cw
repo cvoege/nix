@@ -182,7 +182,6 @@ cw() {
   [ -n "$prompt" ] && cmd="claude --permission-mode auto $(printf '%q' "$prompt")"
   tmux send-keys -t "$win_id.0" "$cmd" Enter
   tmux split-window -v -t "$win_id" -c "$worktree"
-  tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
   tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to park this worktree and close the window"' Enter
   tmux select-pane -t "$win_id.0"
 }
@@ -240,7 +239,6 @@ cw_oneshot_run() {
   local branch="$1" prompt="$2" log="$3" trunk="$4"
   local status=0
   {
-    git stack parent "$trunk" &&
     echo "Starting $branch" &&
     date &&
     cw_install &&
