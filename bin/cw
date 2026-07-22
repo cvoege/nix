@@ -176,7 +176,7 @@ cw() {
   tmux send-keys -t "$win_id.0" "$cmd" Enter
   tmux split-window -v -t "$win_id" -c "$worktree"
   tmux send-keys -t "$win_id.1" "git stack parent '$trunk'" Enter
-  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to remove this worktree and close the window"' Enter
+  tmux send-keys -t "$win_id.1" 'cw install && echo "run cw close to park this worktree and close the window"' Enter
   tmux select-pane -t "$win_id.0"
 }
 
