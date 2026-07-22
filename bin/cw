@@ -307,9 +307,13 @@ cw_close() {
     return 1
   fi
 
-  # Capture the current tmux window before we move away.
+  # Capture this pane's own tmux window before we move away. Target $TMUX_PANE
+  # explicitly: with no -t, display-message resolves against the attached
+  # client's *focused* window, not the pane we're running in — so a one-shot
+  # tearing itself down in the background would otherwise kill whatever window
+  # the user is currently looking at.
   local win_id
-  win_id="$(tmux display-message -p '#{window_id}' 2>/dev/null)"
+  win_id="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{window_id}' 2>/dev/null)"
 
   # Step out of the worktree so operating on its directory is safe.
   cd "$main_root" || return 1
