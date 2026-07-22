@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -euxo pipefail
 
 # Where one-shot runs write their durable logs (NOT /tmp — kept around so a
 # finished run can be looked up later). Override with CW_LOG_DIR.
