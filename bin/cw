@@ -7,21 +7,28 @@ set -euxo pipefail
 CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 
 # cw install
-# Prepares a fresh worktree before claude can work in it: installs deps, runs
-# doppler setup, and copies in the clasp configs that aren't checked in. Shared
-# by both open modes so they never diverge: normal mode runs `cw install` in the
-# setup pane, while one-shot calls cw_install directly.
+# Prepares a worktree by checking the main working tree for a local
+# .local/cw_install.sh. If present, copies it into the current worktree and runs
+# it. The script is a per-machine, untracked setup step (deps, configs) that a
+# fresh pool worktree wouldn't otherwise have.
 cw_install() {
-  pnpm install --frozen-lockfile --prefer-offline || return
-  doppler setup --no-interactive || true
+  local main_root worktree src
+  worktree="$(git rev-parse --show-toplevel)" || return 1
+  # First entry of `git worktree list` is the main working tree — same idiom used
+  # by cw_close / cw_clean.
+  main_root="$(git worktree list | awk 'NR==1{print $1}')" || return 1
+  src="$main_root/.local/cw_install.sh"
 
-  local clasp
-  for clasp in gs-addin slides-addin; do
-    local src="$HOME/code/monorepo/apps/$clasp/.clasp.json"
-    if [ -f "$src" ] ; then
-      cp "$src" "apps/$clasp/.clasp.json"
-    fi
-  done
+  if [ ! -f "$src" ]; then
+    echo "cw install: no .local/cw_install.sh in $main_root; nothing to do"
+    return 0
+  fi
+
+  mkdir -p "$worktree/.local"
+  cp "$src" "$worktree/.local/cw_install.sh"
+  chmod +x "$worktree/.local/cw_install.sh"
+  echo "cw install: running .local/cw_install.sh"
+  ( cd "$worktree" && bash .local/cw_install.sh )
 }
 
 # --- worktree pool ---------------------------------------------------------
