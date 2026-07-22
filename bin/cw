@@ -24,11 +24,85 @@ cw_install() {
   done
 }
 
+# --- worktree pool ---------------------------------------------------------
+# cw keeps a pool of reusable worktrees named cw-worktree-N under
+# <repo>-worktrees. An idle ("parked") worktree sits in detached HEAD at trunk;
+# a busy one is checked out on a branch. Reusing a parked worktree keeps its
+# node_modules and other ignored artifacts around for a fast warm `cw install`.
+
+# _cw_pool_base
+# Echo the worktree pool base dir (<repo_parent>/<repo_name>-worktrees),
+# derived from the main working tree (first entry of `git worktree list`).
+_cw_pool_base() {
+  local main_root
+  main_root="$(git worktree list | awk 'NR==1{print $1}')" || return 1
+  echo "$(dirname "$main_root")/$(basename "$main_root")-worktrees"
+}
+
+# _cw_list_parked
+# Echo the path of every parked pool worktree, one per line: a worktree whose
+# leaf matches cw-worktree-N, that lives under the pool base, and is in detached
+# HEAD (no branch). Busy worktrees (on a branch) are skipped.
+_cw_list_parked() {
+  local base
+  base="$(_cw_pool_base)" || return 1
+  git worktree list --porcelain | awk -v base="$base" '
+    function flush() {
+      if (path != "" && detached && !branch) {
+        n = split(path, parts, "/"); leaf = parts[n]
+        if (leaf ~ /^cw-worktree-[0-9]+$/ && index(path, base "/") == 1) print path
+      }
+      path = ""; detached = 0; branch = 0
+    }
+    /^worktree /  { flush(); path = substr($0, 10) }
+    /^detached$/  { detached = 1 }
+    /^branch /    { branch = 1 }
+    END           { flush() }
+  '
+}
+
+# _cw_find_parked
+# Echo the path of the first parked pool worktree, or nothing if none is free.
+_cw_find_parked() {
+  local all
+  all="$(_cw_list_parked)"
+  echo "${all%%$'\n'*}"
+}
+
+# _cw_next_n
+# Echo the next free pool number: one past the highest cw-worktree-N seen among
+# both registered worktrees and any leftover dirs under the base.
+_cw_next_n() {
+  local base leaf n max=0 path
+  base="$(_cw_pool_base)" || return 1
+
+  while IFS= read -r path; do
+    leaf="${path##*/}"
+    if [[ "$leaf" =~ ^cw-worktree-([0-9]+)$ ]]; then
+      n="${BASH_REMATCH[1]}"
+      if (( n > max )); then max=$n; fi
+    fi
+  done < <(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}')
+
+  if [ -d "$base" ]; then
+    for path in "$base"/cw-worktree-*; do
+      [ -e "$path" ] || continue
+      leaf="${path##*/}"
+      if [[ "$leaf" =~ ^cw-worktree-([0-9]+)$ ]]; then
+        n="${BASH_REMATCH[1]}"
+        if (( n > max )); then max=$n; fi
+      fi
+    done
+  fi
+
+  echo $(( max + 1 ))
+}
+
 # _cw_prepare <branch>
-# Shared setup for both open modes: computes the tmux window name and worktree
-# path for <branch>, fetches origin, resolves trunk, and creates or checks out
-# the worktree. Sets the caller's window/worktree/trunk locals — declare them
-# `local` before calling.
+# Shared setup for both open modes: computes the tmux window name, acquires a
+# pool worktree (reusing a parked one or creating a fresh cw-worktree-N),
+# fetches origin, resolves trunk, and points the worktree at <branch>. Sets the
+# caller's window/worktree/trunk locals — declare them `local` before calling.
 _cw_prepare() {
   local branch="$1"
 
@@ -38,11 +112,6 @@ _cw_prepare() {
   if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
     window="$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
   fi
-
-  # Resolve worktree location and repo root.
-  local repo_root
-  repo_root="$(git rev-parse --show-toplevel)" || return 1
-  worktree="$repo_root/../$(basename "$repo_root")-worktrees/$window"
 
   # Fetch so we know whether the branch exists on origin, and so we base
   # new branches on the latest trunk.
@@ -55,14 +124,29 @@ _cw_prepare() {
     return 1
   fi
 
+  # Acquire a worktree from the pool: reuse a parked (detached) one if any,
+  # otherwise create a fresh cw-worktree-N detached at trunk.
+  worktree="$(_cw_find_parked)"
+  if [ -z "$worktree" ]; then
+    local base n
+    base="$(_cw_pool_base)" || return 1
+    n="$(_cw_next_n)" || return 1
+    worktree="$base/cw-worktree-$n"
+    git worktree add --detach "$worktree" "$trunk" || return 1
+  fi
+
+  # Point the acquired worktree at the requested branch. `git switch` reconciles
+  # tracked files while leaving ignored artifacts (node_modules, .clasp.json)
+  # in place. If the branch is already checked out in another worktree, this
+  # fails — same "can't open a branch twice" behavior as before.
   if git show-ref --verify --quiet "refs/heads/$branch" ||
       git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-    # Branch already exists: pull it from origin and check it out in the worktree.
+    # Branch already exists: pull it from origin and switch to it.
     git fetch origin "$branch:$branch" 2>/dev/null || git branch -f "$branch" "origin/$branch"
-    git worktree add "$worktree" "$branch" || return 1
+    git -C "$worktree" switch "$branch" || return 1
   else
     # New branch, always based on the latest trunk.
-    git worktree add -b "$branch" "$worktree" "$trunk" || return 1
+    git -C "$worktree" switch -c "$branch" "$trunk" || return 1
   fi
 }
 
@@ -186,28 +270,30 @@ cw_review_oneshot() {
   cw_oneshot "$branch" "/code-review max --comment"
 }
 
-# cw close [-f|--force]
-# Tears down the current cw worktree: removes the git worktree and closes
-# its tmux window (both panes). Run it from inside a cw window.
-# Without --force, git refuses if the worktree has uncommitted or untracked
-# changes, so you don't lose work by accident.
+# cw close [--remove|-r] [-f|--force]
+# Tears down the current cw window and releases its worktree. By default the
+# worktree is *parked* (detached at trunk, dir kept with deps) for fast reuse;
+# --remove deletes it instead. Legacy branch-named worktrees are always removed.
+# Without --force, a worktree with uncommitted/untracked changes refuses, so you
+# don't lose work by accident; --force discards those changes.
 cw_close() {
-  local force=""
-  if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--force" ]; then
-    force="--force"
-  fi
+  local force="" remove=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--force)  force="--force" ;;
+      -r|--remove) remove=1 ;;
+    esac
+    shift
+  done
 
   local worktree main_root worktrees_base
   worktree="$(git rev-parse --show-toplevel)" || return 1
 
-  # Find the main working tree so we can run git from outside the worktree
-  # we're about to remove.
+  # Find the main working tree so we can run git from outside the worktree.
   main_root="$(git worktree list | awk 'NR==1{print $1}')"
 
   # Only operate on cw worktrees: those living somewhere under <repo>-worktrees,
-  # next to the main tree. Branch names with slashes (e.g. chore/foo) nest into
-  # subdirs, so match anywhere under the base, not just a direct child. The
-  # first test also refuses to run in the main tree itself.
+  # next to the main tree. The first test also refuses to run in the main tree.
   worktrees_base="$(dirname "$main_root")/$(basename "$main_root")-worktrees"
   if [ "$worktree" = "$main_root" ] || [[ "$worktree"/ != "$worktrees_base"/* ]]; then
     echo "cw_close: not inside a cw worktree" >&2
@@ -218,17 +304,71 @@ cw_close() {
   local win_id
   win_id="$(tmux display-message -p '#{window_id}' 2>/dev/null)"
 
-  # Step out of the worktree so removing its directory is safe.
+  # Step out of the worktree so operating on its directory is safe.
   cd "$main_root" || return 1
 
-  if ! git -C "$main_root" worktree remove $force "$worktree"; then
-    echo "cw_close: worktree not removed (pass --force to discard changes)" >&2
-    cd "$worktree" 2>/dev/null
-    return 1
+  local leaf="${worktree##*/}"
+  if [ -z "$remove" ] && [[ "$leaf" =~ ^cw-worktree-[0-9]+$ ]]; then
+    # Park the pool worktree: detach it at trunk so it stays around (with its
+    # deps) ready for reuse, releasing whatever branch it was on.
+    local trunk
+    trunk="$(git -C "$main_root" stack trunk)"
+    if [ -z "$trunk" ]; then
+      echo "cw_close: could not determine trunk" >&2
+      cd "$worktree" 2>/dev/null
+      return 1
+    fi
+    # status --porcelain ignores gitignored files, so node_modules et al. don't
+    # count as dirty — only real uncommitted/untracked work blocks a park.
+    if [ -n "$(git -C "$worktree" status --porcelain)" ]; then
+      if [ -z "$force" ]; then
+        echo "cw_close: worktree has uncommitted changes (pass -f to discard, or --remove to delete)" >&2
+        cd "$worktree" 2>/dev/null
+        return 1
+      fi
+      # -f: discard tracked changes and untracked files, but keep ignored files
+      # (node_modules) so the parked worktree stays warm.
+      git -C "$worktree" reset --hard
+      git -C "$worktree" clean -fd
+    fi
+    if ! git -C "$worktree" switch --detach "$trunk"; then
+      echo "cw_close: failed to park worktree" >&2
+      cd "$worktree" 2>/dev/null
+      return 1
+    fi
+  else
+    # Remove entirely: explicit --remove, or a legacy (non-pool) worktree.
+    if ! git -C "$main_root" worktree remove $force "$worktree"; then
+      echo "cw_close: worktree not removed (pass --force to discard changes)" >&2
+      cd "$worktree" 2>/dev/null
+      return 1
+    fi
   fi
 
   # Close the tmux window (both panes) if we're inside tmux.
   [ -n "$win_id" ] && tmux kill-window -t "$win_id"
+}
+
+# cw clean
+# Removes every parked (detached) pool worktree, reclaiming disk. Busy worktrees
+# (checked out on a branch) are left untouched. Parked trees are clean, so no
+# --force is needed. Runnable from anywhere in the repo.
+cw_clean() {
+  local main_root path removed=0
+  main_root="$(git worktree list | awk 'NR==1{print $1}')"
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if git -C "$main_root" worktree remove "$path"; then
+      removed=$(( removed + 1 ))
+      echo "cw clean: removed $path"
+    else
+      echo "cw clean: could not remove $path" >&2
+    fi
+  done < <(_cw_list_parked)
+
+  git -C "$main_root" worktree prune
+  echo "cw clean: removed $removed parked worktree(s)"
 }
 
 usage() {
@@ -238,7 +378,8 @@ usage:
   cw oneshot <branch> <prompt>    run claude headless, log output, auto-close
   cw review <branch>              open a worktree + interactive code review of <branch>
   cw review-oneshot <branch>      run a code review headless, log output, auto-close
-  cw close [-f|--force]           tear down the current cw worktree + window
+  cw close [--remove] [-f]        park the current cw worktree (reuse later); --remove to delete
+  cw clean                        remove all parked (idle) worktrees
   cw install                      prepare the current worktree (deps + configs)
 EOF
 }
@@ -254,11 +395,13 @@ main() {
     case "$1" in
       oneshot)     action="oneshot" ;;
       close)          action="close" ;;
+      clean)          action="clean" ;;
       review)         action="review" ;;
       review-oneshot) action="review-oneshot" ;;
       install)     action="install" ;;
       __oneshot)   action="__oneshot" ;;
       -f|--force)  positional+=("$1") ;;
+      -r|--remove) positional+=("$1") ;;
       -h|--help)   usage; return 0 ;;
       --)          shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done; break ;;
       -*)          echo "cw: unknown option: $1" >&2; usage; return 1 ;;
@@ -270,6 +413,7 @@ main() {
   case "$action" in
     oneshot)   cw_oneshot ${positional[@]+"${positional[@]}"} ;;
     close)     cw_close ${positional[@]+"${positional[@]}"} ;;
+    clean)     cw_clean ;;
     review)    cw_review ${positional[@]+"${positional[@]}"} ;;
     review-oneshot) cw_review_oneshot ${positional[@]+"${positional[@]}"} ;;
     install)   cw_install ;;
