@@ -16,4 +16,4 @@ This is a quick tool for sending a desktop notification, primarily on macs.
 
 # Tests 
 
-This repo has tests, which can be run with `just test`. Currently there are only tests for `cw` and `git-stack`, it should stay that way. All tests should pass for whatever you are working on before you call it complete. New features to `cw` and `git-stack` should have tests.
+This repo has tests, which can be run with `just test`. Currently there are only tests for `cw` and `git-stack`, it should stay that way. All tests should pass for whatever you are working on before you call it complete. New features to `cw` and `git-stack` should have tests. Tests for a specific tool can be run based on file path, e.g. `just test bin/test/git-stack` or `just test bin/test/cw`.
