@@ -26,7 +26,8 @@ if [[ $# -gt 0 ]]; then
     [[ -f "$a" ]] && FILES+=("$a") || FILES+=("$HERE/$a")
   done
 else
-  for f in "$HERE"/*.test.sh; do FILES+=("$f"); done
+  while IFS= read -r f; do FILES+=("$f"); done \
+    < <(find "$HERE" -type f -name '*.test.sh' | sort)
 fi
 
 COUNT=$(mktemp); echo 0 >"$COUNT"
