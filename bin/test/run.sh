@@ -23,7 +23,14 @@ source "$HERE/lib/tty.bash"
 declare -a FILES=()
 if [[ $# -gt 0 ]]; then
   for a in "$@"; do
-    [[ -f "$a" ]] && FILES+=("$a") || FILES+=("$HERE/$a")
+    # Resolve each arg relative to CWD first, then to $HERE.
+    p="$a"; [[ -e "$p" ]] || p="$HERE/$a"
+    if [[ -d "$p" ]]; then
+      while IFS= read -r f; do FILES+=("$f"); done \
+        < <(find "$p" -type f -name '*.test.sh' | sort)
+    else
+      FILES+=("$p")
+    fi
   done
 else
   while IFS= read -r f; do FILES+=("$f"); done \

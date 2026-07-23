@@ -1,12 +1,9 @@
 # Task runner for this home-manager config. Run `just` to list targets.
 
-# Run the full git-stack test suite.
-test:
-    bash bin/test/run.sh
-
-# Run one (or more) test files, e.g. `just test-one collapse.test.sh`.
-test-one +FILES:
-    bash bin/test/run.sh {{FILES}}
+# Run the test suite. With no args runs everything; pass files or dirs to
+# scope it, e.g. `just test collapse.test.sh` or `just test bin/test/stack`.
+test *ARGS:
+    bash bin/test/run.sh {{ARGS}}
 
 # Lint the shell scripts. The harness must be clean (SC1091 = dynamically
 # sourced libs, unavoidable). git-stack/install.sh are advisory-only (they carry
