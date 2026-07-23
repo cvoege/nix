@@ -12,8 +12,10 @@ This is a set of utilities for quickly starting up git worktrees to do work in p
 
 ## cnotify
 
-This is a quick tool for sending a desktop notification, primarily on macs.
+This is a quick tool for sending a desktop notification, primarily on macs. Do not write tests for cnotify.
 
 # Tests 
 
 This repo has tests, which can be run with `just test`. Currently there are only tests for `cw` and `git-stack`, it should stay that way. All tests should pass for whatever you are working on before you call it complete. New features to `cw` and `git-stack` should have tests. Tests for a specific tool can be run based on file path, e.g. `just test bin/test/git-stack` or `just test bin/test/cw`.
+
+There are special harnesses written in @test/lib and some mocks and fixtures in @test/fixtures, feel free to use and re-use these when writing tests.
