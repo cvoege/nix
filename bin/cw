@@ -6,6 +6,24 @@ set -euxo pipefail
 # finished run can be looked up later). Override with CW_LOG_DIR.
 CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 
+# --- options ---------------------------------------------------------------
+# Value-taking flags recognised anywhere in the argv — before or after the
+# action word — so `cw --base foo review bar` and `cw review --base foo bar`
+# are the same command. Each line is "<flag>:<name>"; main() parses the flag and
+# stores its value in a local named opt_<name>, which bash's dynamic scoping
+# makes readable from every action (and from _cw_prepare). Add a new option by
+# adding one line here and reading opt_<name> where it matters.
+CW_VALUE_OPTS="
+--base:base
+"
+
+# _cw_opt_var <flag>
+# Echo the opt_<name> suffix a value-taking flag stores into, or nothing if the
+# flag isn't one of them.
+_cw_opt_var() {
+  awk -F: -v f="$1" '$1 == f { print $2; exit }' <<< "$CW_VALUE_OPTS"
+}
+
 # cw install
 # Prepares a worktree by checking the main working tree for a local
 # .local/cw_install.sh. If present, runs it with the current worktree as its
@@ -110,8 +128,12 @@ _cw_next_n() {
 # pool worktree (reusing a parked one or creating a fresh cw-worktree-N),
 # fetches origin, resolves trunk, and points the worktree at <branch>. Sets the
 # caller's window/worktree/trunk locals — declare them `local` before calling.
+#
+# Reads $opt_base (the --base flag, see CW_VALUE_OPTS) via dynamic scoping from
+# main(): the branch a NEW <branch> is created from and stacked on.
 _cw_prepare() {
   local branch="$1"
+  local base="${opt_base:-}"
 
   # Window name: default to the branch name, but for branches shaped like
   # colton/act-123-whatever, use the ticket id (ACT-123) instead.
@@ -131,6 +153,33 @@ _cw_prepare() {
     return 1
   fi
 
+  # Does the requested branch already exist? Decided up front because it also
+  # decides whether --base applies: re-opening an existing branch never rebases
+  # or re-parents it, so its base is irrelevant and the flag is ignored.
+  local exists=0
+  if git show-ref --verify --quiet "refs/heads/$branch" ||
+      git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    exists=1
+  fi
+
+  # Start point for a new branch: --base when given, else the latest trunk.
+  # Resolved and validated *before* acquiring a worktree so a bad --base fails
+  # without leaving a freshly created worktree behind.
+  local base_ref="$trunk"
+  if [ "$exists" -eq 0 ] && [ -n "$base" ]; then
+    if ! git show-ref --verify --quiet "refs/heads/$base"; then
+      if git rev-parse --verify --quiet "refs/remotes/origin/$base" >/dev/null; then
+        # Remote-only base: materialise it locally. It has to be a local ref to
+        # serve as a `git stack parent` target, which git-stack requires.
+        git branch --quiet --track "$base" "origin/$base" || return 1
+      else
+        echo "cw: base branch '$base' does not exist locally or on origin" >&2
+        return 1
+      fi
+    fi
+    base_ref="$base"
+  fi
+
   # Acquire a worktree from the pool: reuse a parked (detached) one if any,
   # otherwise create a fresh cw-worktree-N detached at trunk.
   worktree="$(_cw_find_parked)"
@@ -146,14 +195,19 @@ _cw_prepare() {
   # tracked files while leaving ignored artifacts (node_modules, .clasp.json)
   # in place. If the branch is already checked out in another worktree, this
   # fails — same "can't open a branch twice" behavior as before.
-  if git show-ref --verify --quiet "refs/heads/$branch" ||
-      git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+  if [ "$exists" -eq 1 ]; then
     # Branch already exists: pull it from origin and switch to it.
     git fetch origin "$branch:$branch" 2>/dev/null || git branch -f "$branch" "origin/$branch"
     git -C "$worktree" switch "$branch" || return 1
   else
-    # New branch, always based on the latest trunk.
-    git -C "$worktree" switch -c "$branch" "$trunk" || return 1
+    # New branch, based on --base (or the latest trunk) and recorded as stacked
+    # on it so `git stack` sees it. The ref check keeps the parent step from
+    # failing the whole open when trunk has no local branch — git-stack only
+    # accepts a local branch as a parent.
+    git -C "$worktree" switch -c "$branch" "$base_ref" || return 1
+    if git show-ref --verify --quiet "refs/heads/$base_ref"; then
+      git -C "$worktree" stack parent "$base_ref" || return 1
+    fi
   fi
 }
 
@@ -383,24 +437,63 @@ cw_clean() {
 usage() {
   cat >&2 <<'EOF'
 usage:
-  cw <branch> [prompt]            open a worktree + interactive claude in tmux
-  cw oneshot <branch> <prompt>    run claude headless, log output, auto-close
-  cw review <branch>              open a worktree + interactive code review of <branch>
-  cw review-oneshot <branch>      run a code review headless, log output, auto-close
-  cw close [--remove] [-f]        park the current cw worktree (reuse later); --remove to delete
-  cw clean                        remove all parked (idle) worktrees
-  cw install                      prepare the current worktree (deps + configs)
+  cw [opts] <branch> [prompt]         open a worktree + interactive claude in tmux
+  cw oneshot [opts] <branch> <prompt> run claude headless, log output, auto-close
+  cw review [opts] <branch>           open a worktree + interactive code review of <branch>
+  cw review-oneshot [opts] <branch>   run a code review headless, log output, auto-close
+  cw close [--remove] [-f]            park the current cw worktree (reuse later); --remove to delete
+  cw clean                            remove all parked (idle) worktrees
+  cw install                          prepare the current worktree (deps + configs)
+
+opts (window-creating actions; may go before or after the action word, so
+`cw --base main review foo` and `cw review --base main foo` are the same):
+  --base <branch>   create a NEW <branch> from <branch> instead of trunk, and
+                    record it as its `git stack` parent. Errors if <branch>
+                    exists neither locally nor on origin. Ignored when the
+                    branch being opened already exists.
 EOF
 }
 
 # --- argument dispatch ----------------------------------------------------
-# Flags select which action to run; everything else is collected as positional
-# args and forwarded to it. Add new flags by extending the case below.
+# Bare words select which action to run; value-taking flags come from
+# CW_VALUE_OPTS (--base <v> or --base=<v>, anywhere in the argv); everything
+# else is collected as positional args and forwarded to the action. Add a new
+# action by extending the case below, a new option by extending CW_VALUE_OPTS.
 main() {
   local action="cw"
   local -a positional=()
 
+  # One local per declared option, named opt_<name> and cleared so nothing can
+  # leak in from the environment. Declared here (rather than per action) so
+  # every action and helper can read them through bash's dynamic scoping.
+  local _flag _var
+  while IFS=: read -r _flag _var; do
+    [ -n "$_var" ] || continue
+    eval "local opt_$_var=''"
+  done <<< "$CW_VALUE_OPTS"
+
   while [ $# -gt 0 ]; do
+    # A declared value-taking flag, in either --flag value or --flag=value form.
+    _var=""
+    case "$1" in
+      --*=*) _var="$(_cw_opt_var "${1%%=*}")" ;;
+      --*)   _var="$(_cw_opt_var "$1")" ;;
+    esac
+    if [ -n "$_var" ]; then
+      case "$1" in
+        --*=*) printf -v "opt_$_var" '%s' "${1#*=}" ;;
+        *)
+          if [ $# -lt 2 ]; then
+            echo "cw: $1 requires a value" >&2
+            return 1
+          fi
+          printf -v "opt_$_var" '%s' "$2"
+          shift ;;
+      esac
+      shift
+      continue
+    fi
+
     case "$1" in
       oneshot)     action="oneshot" ;;
       close)          action="close" ;;
