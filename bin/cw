@@ -6,6 +6,16 @@ set -euo pipefail
 # finished run can be looked up later). Override with CW_LOG_DIR.
 CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 
+# How long `cw wait` keeps looking for a log that doesn't exist yet (seconds).
+# `cw oneshot` returns as soon as it has handed the command to its tmux pane, so
+# a script that launches and then waits can get there before the log does.
+CW_WAIT_LOG_GRACE="${CW_WAIT_LOG_GRACE:-30}"
+
+# Line cw_oneshot_run appends to a log when the run is over, carrying its exit
+# code. It's the one end-of-run signal that survives claude dying before it can
+# emit a stream-json `result` event, and what `cw wait` blocks on.
+CW_EXIT_PREFIX="cw: oneshot exit "
+
 # --- options ---------------------------------------------------------------
 # Value-taking flags recognised anywhere in the argv — before or after the
 # action word — so `cw --base foo review bar` and `cw review --base foo bar`
@@ -15,6 +25,7 @@ CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 # adding one line here and reading opt_<name> where it matters.
 CW_VALUE_OPTS="
 --base:base
+--timeout:timeout
 "
 
 # _cw_opt_var <flag>
@@ -123,6 +134,20 @@ _cw_next_n() {
   echo $(( max + 1 ))
 }
 
+# _cw_window_name <branch>
+# Echo the tmux window name for <branch>: the branch name itself, except that
+# branches shaped like colton/act-123-whatever collapse to the ticket id
+# (ACT-123). One-shot log filenames are derived from this too, which is how
+# `cw wait <branch>` finds the log of a run it didn't start.
+_cw_window_name() {
+  local branch="$1"
+  if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
+    echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]'
+  else
+    echo "$branch"
+  fi
+}
+
 # _cw_prepare <branch>
 # Shared setup for both open modes: computes the tmux window name, acquires a
 # pool worktree (reusing a parked one or creating a fresh cw-worktree-N),
@@ -135,12 +160,7 @@ _cw_prepare() {
   local branch="$1"
   local base="${opt_base:-}"
 
-  # Window name: default to the branch name, but for branches shaped like
-  # colton/act-123-whatever, use the ticket id (ACT-123) instead.
-  window="$branch"
-  if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
-    window="$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
-  fi
+  window="$(_cw_window_name "$branch")"
 
   # Fetch so we know whether the branch exists on origin, and so we base
   # new branches on the latest trunk.
@@ -305,13 +325,146 @@ cw_oneshot_run() {
   # the instant claude/setup fails (which would skip the notify + teardown
   # below), and captures the failing exit code. With `pipefail` on and tee
   # effectively never failing, this is the pipeline body's status.
-  echo "$status"
+  #
+  # Record the outcome in the log itself (see CW_EXIT_PREFIX): claude only emits
+  # a `result` event when it gets that far, so a run that dies during setup would
+  # otherwise leave a log that's indistinguishable from one still running.
+  # `cw wait` blocks on this line and exits with the code it carries.
+  printf '%s%s\n' "$CW_EXIT_PREFIX" "$status" | tee -a "$log"
   # if [ "$status" -eq 0 ]; then
   #   cnotify -s Glass "$branch finished" "cw one-shot" || true
   # else
   #   cnotify -s Basso "$branch failed (exit $status)" "cw one-shot" || true
   # fi
   cw_close
+}
+
+# --- wait ------------------------------------------------------------------
+
+# _cw_newest_log [<substring>]
+# Echo the newest log under $CW_LOG_DIR whose filename contains <substring>
+# (the newest log of all when it's empty). Returns 1 with no output on no match.
+_cw_newest_log() {
+  local pat="${1:-}" path
+  # ls -t sorts newest-first; log filenames are branch+timestamp, so no newlines.
+  while IFS= read -r path; do
+    [ -f "$path" ] || continue
+    if [ -z "$pat" ] || [[ "${path##*/}" == *"$pat"* ]]; then
+      echo "$path"
+      return 0
+    fi
+  done < <(ls -t -- "$CW_LOG_DIR"/*.log 2>/dev/null || true)
+  return 1
+}
+
+# _cw_log_exit <log>
+# Echo the exit status of the run that wrote <log>, or return 1 if it's still
+# going. The authority is the terminator line cw_oneshot_run appends; logs from
+# before that existed (or a pane killed between claude finishing and the append)
+# fall back to the stream-json `result` event, which carries success/failure but
+# not the code.
+_cw_log_exit() {
+  local log="$1" line
+  line="$(grep -a "^$CW_EXIT_PREFIX" "$log" 2>/dev/null | tail -n 1 || true)"
+  if [ -n "$line" ]; then
+    echo "${line##* }"
+    return 0
+  fi
+  # Match only the `result` event's own is_error; tool_result blocks carry an
+  # is_error field too, so grepping the whole log for it would report a run as
+  # failed just because one tool call inside it errored.
+  line="$(grep -a '"type"[[:space:]]*:[[:space:]]*"result"' "$log" 2>/dev/null | tail -n 1 || true)"
+  if [ -n "$line" ]; then
+    case "$line" in
+      *'"is_error"'*:*true*) echo 1 ;;
+      *) echo 0 ;;
+    esac
+    return 0
+  fi
+  return 1
+}
+
+# cw wait [--timeout <secs>] [<branch>|<log>]
+# Blocks until a one-shot run finishes, streaming its log through cwtail while
+# it waits, and exits with the run's own status — so launching and waiting
+# composes:
+#
+#   cw oneshot chore/foo "do the thing" && cw wait chore/foo && gh pr create …
+#
+# <branch>|<log> picks the run: a log path, a branch name (mapped through
+# _cw_window_name, since that's what the log is named after), or any substring
+# of a log filename. Omit it to wait on the newest log in $CW_LOG_DIR. Waiting
+# on an already-finished run just renders its log and returns that status.
+cw_wait() {
+  local target="${1:-}"
+  local timeout="${opt_timeout:-0}"
+  if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
+    echo "cw wait: --timeout takes whole seconds, got '$timeout'" >&2
+    return 1
+  fi
+
+  # A path wins outright. Otherwise try the branch's window name first (an exact
+  # log-name prefix) and the raw target second, so `cw wait ACT-123`,
+  # `cw wait colton/act-123-thing` and `cw wait chore/foo` all resolve.
+  local log=""
+  local -a pats=("")
+  if [ -n "$target" ] && [ -f "$target" ]; then
+    log="$target"
+  elif [ -n "$target" ]; then
+    local window
+    window="$(_cw_window_name "$target")"
+    pats=("${window//\//-}" "${target//\//-}")
+  fi
+
+  local waited=0 pat
+  while [ -z "$log" ]; do
+    for pat in "${pats[@]}"; do
+      log="$(_cw_newest_log "$pat" || true)"
+      [ -n "$log" ] && break
+    done
+    [ -n "$log" ] && break
+    if [ "$waited" -ge "$CW_WAIT_LOG_GRACE" ]; then
+      echo "cw wait: no log matching '${target:-(any)}' in $CW_LOG_DIR" >&2
+      return 1
+    fi
+    [ "$waited" -eq 0 ] && echo "cw wait: waiting for a log matching '$target'…" >&2
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+
+  # Already finished: render it once, no follow, and report the status.
+  local status
+  if status="$(_cw_log_exit "$log")"; then
+    cwtail --no-follow "$log"
+    return "$status"
+  fi
+
+  # Still running: cwtail follows the log in the background (it renders what's
+  # already there first, so you see the whole run) while we poll for the
+  # terminator line. Polling here rather than leaning on cwtail's own
+  # stop-at-`result` behavior is what makes a run that died before emitting a
+  # result event finish the wait instead of hanging it.
+  cwtail -f "$log" &
+  local tail_pid=$!
+  trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+
+  waited=0
+  while :; do
+    if status="$(_cw_log_exit "$log")"; then
+      sleep 1   # let cwtail render the last few lines before we cut it off
+      kill "$tail_pid" 2>/dev/null || true
+      wait "$tail_pid" 2>/dev/null || true
+      return "$status"
+    fi
+    if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
+      kill "$tail_pid" 2>/dev/null || true
+      wait "$tail_pid" 2>/dev/null || true
+      echo "cw wait: timed out after ${timeout}s; $log is still running" >&2
+      return 124
+    fi
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
 }
 
 # cw review <branch>
@@ -439,18 +592,23 @@ usage() {
 usage:
   cw [opts] <branch> [prompt]         open a worktree + interactive claude in tmux
   cw oneshot [opts] <branch> <prompt> run claude headless, log output, auto-close
+  cw wait [opts] [<branch>|<log>]     block until a one-shot finishes, streaming
+                                      its log via cwtail; exits with its status
+                                      (defaults to the newest log)
   cw review [opts] <branch>           open a worktree + interactive code review of <branch>
   cw review-oneshot [opts] <branch>   run a code review headless, log output, auto-close
   cw close [--remove] [-f]            park the current cw worktree (reuse later); --remove to delete
   cw clean                            remove all parked (idle) worktrees
   cw install                          prepare the current worktree (deps + configs)
 
-opts (window-creating actions; may go before or after the action word, so
-`cw --base main review foo` and `cw review --base main foo` are the same):
-  --base <branch>   create a NEW <branch> from <branch> instead of trunk, and
-                    record it as its `git stack` parent. Errors if <branch>
-                    exists neither locally nor on origin. Ignored when the
-                    branch being opened already exists.
+opts (may go before or after the action word, so `cw --base main review foo` and
+`cw review --base main foo` are the same):
+  --base <branch>   (window-creating actions) create a NEW <branch> from
+                    <branch> instead of trunk, and record it as its `git stack`
+                    parent. Errors if <branch> exists neither locally nor on
+                    origin. Ignored when the branch being opened already exists.
+  --timeout <secs>  (wait) give up after <secs> and exit 124 instead of waiting
+                    for the run to finish. 0 (the default) waits forever.
 EOF
 }
 
@@ -496,6 +654,7 @@ main() {
 
     case "$1" in
       oneshot)     action="oneshot" ;;
+      wait)           action="wait" ;;
       close)          action="close" ;;
       clean)          action="clean" ;;
       review)         action="review" ;;
@@ -514,6 +673,7 @@ main() {
 
   case "$action" in
     oneshot)   cw_oneshot ${positional[@]+"${positional[@]}"} ;;
+    wait)      cw_wait ${positional[@]+"${positional[@]}"} ;;
     close)     cw_close ${positional[@]+"${positional[@]}"} ;;
     clean)     cw_clean ;;
     review)    cw_review ${positional[@]+"${positional[@]}"} ;;
