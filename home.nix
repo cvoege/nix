@@ -84,6 +84,8 @@ in
     # pkgs.claude-code
     pkgs.opentofu
     pkgs.bun
+    # Declarative CLI argument parsing for ./bin/* (see the `# @cmd` comments).
+    pkgs.argc
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -94,18 +96,18 @@ in
     # See ./bin/*; ~/.bin is already on PATH (set in programs.bash.initExtra).
     ".bin/git-stack" = { source = ./bin/git-stack; executable = true; };
     ".bin/cw" = { source = ./bin/cw; executable = true; };
+    ".bin/ct" = { source = ./bin/ct; executable = true; };
     ".bin/cnotify" = { source = ./bin/cnotify; executable = true; };
-    ".bin/cwtail" = { source = ./bin/cwtail; executable = true; };
 
     # Claude Code user-level config: subagents, slash commands and skills.
     # See ./claude-home/*; Claude reads these from ~/.claude in every project.
     # recursive = true links each file individually instead of turning the
     # directory itself into a store symlink, so ad-hoc unmanaged agents/skills
     # can still live alongside these (and the dirs stay writable).
-    ".claude/agents" = { source = ./claude-home/agents; recursive = true; };
-    ".claude/commands" = { source = ./claude-home/commands; recursive = true; };
+    # ".claude/agents" = { source = ./claude-home/agents; recursive = true; };
+    # ".claude/commands" = { source = ./claude-home/commands; recursive = true; };
     ".claude/skills" = { source = ./claude-home/skills; recursive = true; };
-    ".claude/workflows" = { source = ./claude-home/workflows; recursive = true; };
+    # ".claude/workflows" = { source = ./claude-home/workflows; recursive = true; };
     ".claude/settings-base.json" = { source = ./claude-home/settings-base.json; };
     ".claude/CLAUDE.md" = { source = ./agent-shared/AGENTS.md; };
     ".pi/agent/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
@@ -357,6 +359,19 @@ in
 
       start_llama() {
         llama-server   --models-dir ~/models   --no-models-autoload   --jinja   --host 127.0.0.1   --port 8080   -ngl 999
+      }
+
+      setup_meridian() {
+        npm install -g @rynfar/meridian
+        # claude login
+        meridian setup
+      }
+      start_meridian() {
+        meridian
+      }
+
+      copencode() {
+        ANTHROPIC_API_KEY=x ANTHROPIC_BASE_URL=http://127.0.0.1:3456 opencode "$@"
       }
     '';
   };

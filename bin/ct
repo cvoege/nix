@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+# @describe Manage a pool of reusable git worktrees for parallel work.
+
+# shellcheck disable=SC2154
+
+set -euo pipefail
+
+die() { echo "ct: $*" >&2; exit 1; }
+
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+  die "needs bash 5+ (running ${BASH_VERSION}); got /bin/bash?"
+fi
+
+# Argument parsing is driven by argc (pkgs.argc, see home.nix): each subcommand
+# is a function annotated with `# @cmd` / `# @option` / `# @arg` comments, from
+# which argc builds the parser, generates `--help`, and dispatches. Descriptions
+# are kept to one line each — argc reproduces a continuation line's leading
+# whitespace verbatim, which comes out ragged in the generated help.
+#
+# Without argc on PATH the eval at the end of the file expands to nothing and ct
+# would exit 0 having done nothing at all, so check up front.
+command -v argc >/dev/null \
+  || die "argc not found; ct needs it to parse arguments (nix: pkgs.argc)"
+
+# _noargs <command> [<arg>...]
+# Reject stray arguments to a subcommand that takes none. argc validates flags
+# and declared positionals, but a command that declares no positional silently
+# accepts them, so the arg-less subcommands call this.
+_noargs() {
+  local cmd="$1"; shift
+  [ $# -eq 0 ] || die "$cmd: unexpected argument '$1'"
+}
+
+# _ct_main_root
+# First entry of `git worktree list` is the main working tree
+_ct_main_root() {
+  git worktree list | awk 'NR==1{print $1}'
+}
+
+# --- worktree pool ---------------------------------------------------------
+# ct keeps a pool of reusable worktrees named ct-worktree-N under
+# <repo>-worktrees. An idle ("parked") worktree sits in detached HEAD at trunk;
+# a busy one is checked out on a branch. Reusing a parked worktree keeps its
+# node_modules and other ignored artifacts around for a fast warm `ct install`.
+
+# _ct_pool_base
+# Echo the worktree pool base dir (<repo_parent>/<repo_name>-worktrees),
+# derived from the main working tree (first entry of `git worktree list`).
+_ct_pool_base() {
+  local main_root
+  main_root="$(_ct_main_root)" || return 1
+  echo "$(dirname "$main_root")/$(basename "$main_root")-worktrees"
+}
+
+# _ct_list_parked
+# Echo the path of every parked pool worktree, one per line: a worktree whose
+# leaf matches ct-worktree-N, that lives under the pool base, and is in detached
+# HEAD (no branch). Busy worktrees (on a branch) are skipped.
+_ct_list_parked() {
+  local base
+  base="$(_ct_pool_base)" || return 1
+  git worktree list --porcelain | awk -v base="$base" '
+    function flush() {
+      if (path != "" && detached && !branch) {
+        n = split(path, parts, "/"); leaf = parts[n]
+        if (leaf ~ /^ct-worktree-[0-9]+$/ && index(path, base "/") == 1) print path
+      }
+      path = ""; detached = 0; branch = 0
+    }
+    /^worktree /  { flush(); path = substr($0, 10) }
+    /^detached$/  { detached = 1 }
+    /^branch /    { branch = 1 }
+    END           { flush() }
+  '
+}
+
+# _ct_find_parked
+# Echo the path of the first parked pool worktree, or nothing if none is free.
+_ct_find_parked() {
+  local all
+  all="$(_ct_list_parked)"
+  echo "${all%%$'\n'*}"
+}
+
+# _ct_get_path_leaf <path>
+# Echoes the last element of a path
+# e.g. ct_get_path "/a/b/c" -> "c"
+_ct_get_path_leaf() {
+  echo "${1##*/}"
+}
+
+# _ct_get_worktree_number <path>
+# echo N if the path is a ct-worktree-N, else fail.
+# e.g. _ct_get_worktree_number "/a/b/ct-worktree-1" -> "1"
+# e.g. _ct_get_worktree_number "ct-worktree-1" -> "1"
+# e.g. _ct_get_worktree_number "asdf" -> fail
+_ct_get_worktree_number() {
+  [[ "$(_ct_get_path_leaf "$1")" =~ ^ct-worktree-([0-9]+)$ ]] || return 1
+  echo "${BASH_REMATCH[1]}"
+}
+
+# _ct_is_ct_worktree <path>
+# Checks if the given path is a ct worktree
+# e.g. ct_get_path "/a/b/ct-worktree-1" -> true
+# e.g. ct_get_path "ct-worktree-1" -> true
+# e.g. ct_get_path "asdf" -> fail
+_ct_is_ct_worktree() {
+  _ct_get_worktree_number "$1" >/dev/null
+}
+
+# _ct_next_worktree_number
+# Echo the next free pool number: one past the highest ct-worktree-N seen among
+# both registered worktrees and any leftover dirs under the base.
+_ct_next_worktree_number() {
+  local base n max=0 path
+  base="$(_ct_pool_base)" || return 1
+
+  # Check actual worktrees
+  while IFS= read -r path; do
+    if _ct_is_ct_worktree "$path" ; then
+      n="$(_ct_get_worktree_number "$path")"
+      if (( n > max )); then max=$n; fi
+    fi
+  done < <(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}')
+
+  # Check leftover dirs
+  if [ -d "$base" ]; then
+    for path in "$base"/ct-worktree-*; do
+      [ -e "$path" ] || continue
+      if _ct_is_ct_worktree "$path" ; then
+        n="$(_ct_get_worktree_number "$path")"
+        if (( n > max )); then max=$n; fi
+      fi
+    done
+  fi
+
+  echo $(( max + 1 ))
+}
+
+
+# Absolute path of this script. A ct shell calls back into the *same* ct that
+# spawned it (CT_BIN below) rather than whatever `ct` PATH resolves to, so a
+# stale install or an edited PATH can't answer the release checks for a shell
+# this copy is managing.
+_ct_self="$(cd -P "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+
+# ct install
+# Prepares a worktree by checking the main working tree for a local
+# .local/ct_install.sh. If present, runs it with the current worktree as its
+# working directory. The script is a per-machine, untracked setup step (deps,
+# configs) that a fresh pool worktree wouldn't otherwise have; running the
+# canonical copy in the main tree keeps a single source of truth.
+ct_install() {
+  local main_root worktree src
+  worktree="$(git rev-parse --show-toplevel)" || return 1
+  # First entry of `git worktree list` is the main working tree
+  main_root="$(_ct_main_root)" || return 1
+  src="$main_root/.local/ct_install.sh"
+
+  if [ ! -f "$src" ]; then
+    echo "ct install: no .local/ct_install.sh in $main_root; nothing to do"
+    return 0
+  fi
+
+  # Pass the main working tree path as $1 so the script can reach the original
+  # repo (e.g. to copy over untracked local files).
+  echo "ct install: running $src"
+  ( cd "$worktree" && bash "$src" "$main_root" )
+}
+
+# Open a worktree on <branch>, creating the branch off --base (or trunk) when it
+# doesn't exist yet.
+
+# @cmd    Open a worktree on a branch (new or existing)
+# @option -b --base <BRANCH>  base a new branch on this instead of trunk
+# @arg    branch!             branch to open
+start() {
+  local branch="$argc_branch" base="${argc_base:-}"
+  local main_root trunk worktree
+
+  main_root="$(_ct_main_root)" || return 1
+
+  # Fetch so we know whether the branch exists on origin, and so we base
+  # new branches on the latest trunk.
+  git fetch origin --quiet
+
+  # trunk is needed both for basing new branches and for `git stack parent`.
+  trunk="$(git stack trunk)"
+  if [ -z "$trunk" ]; then
+    echo "ct: could not determine origin's default branch" >&2
+    return 1
+  fi
+
+  # Does the requested branch already exist? Decided up front because it also
+  # decides whether --base applies: re-opening an existing branch never rebases
+  # or re-parents it, so its base is irrelevant and the flag is ignored.
+  local exists=0
+  if git show-ref --verify --quiet "refs/heads/$branch" ||
+      git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    exists=1
+  fi
+
+  # If the branch already exists, --base is an invalid option, error rather than proceed
+  if [ "$exists" -eq 1 ] && [ -n "$base" ] && [ "$base" != "$trunk" ] ; then
+    echo "ct: can not pass '--base' with a branch that already exists" >&2
+    return 1
+  fi
+
+
+  # Start point for a new branch: --base when given, else the latest trunk.
+  # Resolved and validated *before* acquiring a worktree so a bad --base fails
+  # without leaving a freshly created worktree behind.
+  local base_ref="$trunk"
+  if [ "$exists" -eq 0 ] && [ -n "$base" ]; then
+    if ! git show-ref --verify --quiet "refs/heads/$base"; then
+      if git rev-parse --verify --quiet "refs/remotes/origin/$base" >/dev/null; then
+        # Remote-only base: materialise it locally. It has to be a local ref to
+        # serve as a `git stack parent` target, which git-stack requires.
+        git branch --quiet --track "$base" "origin/$base" || return 1
+      else
+        echo "ct: base branch '$base' does not exist locally or on origin" >&2
+        return 1
+      fi
+    fi
+    base_ref="$base"
+  fi
+
+  # Acquire a worktree from the pool: reuse a parked (detached) one if any,
+  # otherwise create a fresh ct-worktree-N detached at trunk.
+  worktree="$(_ct_find_parked)"
+  if [ -z "$worktree" ]; then
+    # Named pool_base, not base: `base` is this function's <base> parameter.
+    local pool_base n
+    pool_base="$(_ct_pool_base)" || return 1
+    n="$(_ct_next_worktree_number)" || return 1
+    worktree="$pool_base/ct-worktree-$n"
+    git worktree add --detach "$worktree" "$trunk" || return 1
+  fi
+
+  # Point the acquired worktree at the requested branch. `git switch` reconciles
+  # tracked files while leaving ignored artifacts (node_modules, .clasp.json)
+  # in place. If the branch is already checked out in another worktree, this
+  # fails — same "can't open a branch twice" behavior as before.
+  if [ "$exists" -eq 1 ]; then
+    if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+      if git show-ref --verify --quiet "refs/heads/$branch"; then
+        git fetch origin "$branch:$branch" 2>/dev/null ||
+          echo "ct: could not fast-forward '$branch' to origin/$branch; using the local branch" >&2
+      else
+        git branch --quiet --track "$branch" "origin/$branch" || return 1
+      fi
+    fi
+    git -C "$worktree" switch "$branch" || return 1
+  else
+    # New branch, based on --base (or the latest trunk) and recorded as stacked
+    # on it so `git stack` sees it. The ref check keeps the parent step from
+    # failing the whole open when trunk has no local branch — git-stack only
+    # accepts a local branch as a parent.
+    git -C "$worktree" switch -c "$branch" "$base_ref" || return 1
+    if git show-ref --verify --quiet "refs/heads/$base_ref"; then
+      git -C "$worktree" stack parent "$base_ref" || return 1
+    fi
+  fi
+
+  echo "Worktree created: $worktree"
+  cd "$worktree"
+  echo "Running install..."
+  ct_install || { echo "Failed install in $worktree" >&2; return 1; }
+  echo "Install complete!"
+  echo "cd $worktree"
+}
+
+# _ct_registered_paths
+# Echo the path of every worktree registered in this repo, one per line.
+_ct_registered_paths() {
+  git worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}'
+}
+
+# _ct_worktree_for_branch <branch>
+# Echo the path of the worktree that has <branch> checked out, if any.
+_ct_worktree_for_branch() {
+  git worktree list --porcelain | awk -v ref="refs/heads/$1" '
+    /^worktree /{ wt = substr($0, 10) }
+    $1 == "branch" && $2 == ref { print wt; exit }
+  '
+}
+
+# _ct_resolve_target <target>
+# Echo the absolute path of the worktree <target> names. Accepts, in precedence
+# order: a path to (or inside) a registered worktree, a pool worktree leaf name
+# (ct-worktree-N), or a branch currently checked out in a worktree. Precedence
+# only matters for pathological names — a branch called ct-worktree-3, or one
+# that matches a directory in the cwd — and each form is only accepted if it
+# resolves to a worktree of *this* repo, so a miss falls through to the next.
+_ct_resolve_target() {
+  local target="$1" abs top pool path
+
+  # 1. a path to, or inside, a worktree
+  if [ -d "$target" ]; then
+    abs="$(cd -P "$target" 2>/dev/null && pwd)" || abs=""
+    if [ -n "$abs" ]; then
+      top="$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null || true)"
+      if [ -n "$top" ] && _ct_is_registered "$top"; then echo "$top"; return 0; fi
+    fi
+  fi
+
+  # 2. a pool worktree leaf name
+  if _ct_is_ct_worktree "$target"; then
+    pool="$(_ct_pool_base)" || return 1
+    if _ct_is_registered "$pool/$target"; then echo "$pool/$target"; return 0; fi
+  fi
+
+  # 3. a branch that some worktree has checked out
+  path="$(_ct_worktree_for_branch "$target")"
+  if [ -n "$path" ]; then echo "$path"; return 0; fi
+
+  echo "ct: '$target' doesn't name a worktree of this repo (tried it as a path, a" >&2
+  echo "  pool worktree name, and a checked-out branch)." >&2
+  return 1
+}
+
+# _ct_is_registered <path>
+_ct_is_registered() {
+  local want="$1" path
+  while IFS= read -r path; do
+    [ "$path" = "$want" ] && return 0
+  done < <(_ct_registered_paths)
+  return 1
+}
+
+# _ct_release_check <worktree> <force> <remove>
+# Return 0 if <worktree> can be released, else explain why not on stderr.
+# Mutates nothing.
+_ct_release_check() {
+  local worktree="$1" force="$2" remove="$3"
+  local main_root pool_base
+
+  main_root="$(_ct_main_root)" || return 1
+  pool_base="$(_ct_pool_base)" || return 1
+
+  # Only operate on ct worktrees: those living somewhere under <repo>-worktrees,
+  # next to the main tree. The first test also refuses to act on the main tree.
+  if [ "$worktree" = "$main_root" ] || [[ "$worktree"/ != "$pool_base"/* ]]; then
+    echo "ct: '$worktree' is not a ct worktree" >&2
+    return 1
+  fi
+
+  # status --porcelain ignores gitignored files, so node_modules et al. don't
+  # count as dirty — only real uncommitted/untracked work blocks a release.
+  if [ -n "$(git -C "$worktree" status --porcelain)" ] && [ -z "$force" ]; then
+    echo "ct: '$worktree' has uncommitted changes; commit them, or pass -f to discard" >&2
+    return 1
+  fi
+
+  if [ -z "$remove" ] && _ct_is_ct_worktree "$worktree"; then
+    if [ -z "$(git -C "$main_root" stack trunk)" ]; then
+      echo "ct: could not determine trunk, so the worktree can't be parked" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# _ct_release <worktree> <force> <remove>
+# Park <worktree> (detach at trunk, keep the dir and its warm deps) or, with
+# <remove>, delete it. Assumes _ct_release_check has just passed.
+_ct_release() {
+  local worktree="$1" force="$2" remove="$3"
+  local main_root trunk leaf
+  main_root="$(_ct_main_root)" || return 1
+
+  # Never act on a worktree we're standing in: a remove would delete the cwd out
+  # from under this process.
+  cd "$main_root" || return 1
+
+  leaf="$(_ct_get_path_leaf "$worktree")"
+  if [ -z "$remove" ] && _ct_is_ct_worktree "$leaf"; then
+    trunk="$(git -C "$main_root" stack trunk)"
+    if [ -n "$(git -C "$worktree" status --porcelain)" ]; then
+      # Only reachable with force (the check refuses otherwise): discard tracked
+      # changes and untracked files, but keep ignored ones (node_modules) so the
+      # parked worktree stays warm.
+      git -C "$worktree" reset --hard
+      git -C "$worktree" clean -fd
+    fi
+    if ! git -C "$worktree" switch --detach "$trunk"; then
+      echo "ct: failed to park '$worktree'" >&2
+      return 1
+    fi
+    echo "ct: parked $leaf (detached at $trunk)"
+  else
+    # Remove entirely: explicit --remove, or a legacy (non-pool) worktree.
+    # $force is deliberately unquoted: it's either "--force" or empty, and an
+    # empty quoted arg would be passed to git as a bogus worktree path.
+    # shellcheck disable=SC2086
+    if ! git -C "$main_root" worktree remove $force "$worktree"; then
+      echo "ct: worktree not removed: '$worktree' (pass -f to discard changes)" >&2
+      return 1
+    fi
+    echo "ct: removed $worktree"
+  fi
+}
+
+# Release a worktree: park it by default (detached at trunk, dir kept with its
+# deps for a fast warm reuse), or delete it with --remove. Without a target it's
+# the worktree you're currently in, which is what the `close` alias is for.
+# --check runs the refusal checks and stops there, changing nothing — it's how
+# `ctclose` validates a release from inside the shell being released.
+
+# @cmd   Release a worktree named by path, worktree name or branch
+# @alias close
+# @flag  -f --force   discard uncommitted and untracked changes
+# @flag  -r --remove  delete the worktree instead of parking it for reuse
+# @flag     --check   run the refusal checks only, changing nothing
+# @arg   target       worktree path, ct-worktree-N or branch (default: current)
+park() {
+  local target="${argc_target:-}" remove="${argc_remove:-}" check="${argc_check:-}"
+  # _ct_release passes $force to `git worktree remove` unquoted, so it has to be
+  # the literal flag rather than a boolean.
+  local force=""
+  [ -n "${argc_force:-}" ] && force="--force"
+
+  local worktree
+  if [ -n "$target" ]; then
+    worktree="$(_ct_resolve_target "$target")" || return 1
+  else
+    worktree="$(git rev-parse --show-toplevel 2>/dev/null)" || worktree=""
+    if [ -z "$worktree" ]; then
+      echo "ct: not inside a git worktree; pass a worktree, branch or path to park" >&2
+      return 1
+    fi
+  fi
+
+  _ct_release_check "$worktree" "$force" "$remove" || return 1
+  [ -n "$check" ] && return 0
+  _ct_release "$worktree" "$force" "$remove"
+}
+
+# Removes every parked (detached) pool worktree, reclaiming disk. Busy worktrees
+# (checked out on a branch) are left untouched. Parked trees are clean, so no
+# --force is needed. Runnable from anywhere in the repo.
+
+# @cmd Remove all parked (idle) worktrees
+clean() {
+  _noargs clean "$@"
+  local main_root path removed=0
+  main_root="$(__ct_main_root)"
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if git -C "$main_root" worktree remove "$path"; then
+      removed=$(( removed + 1 ))
+      echo "ct clean: removed $path"
+    else
+      echo "ct clean: could not remove $path" >&2
+    fi
+  done < <(_ct_list_parked)
+
+  git -C "$main_root" worktree prune
+  echo "ct clean: removed $removed parked worktree(s)"
+}
+
+# The one command that stays a wrapper: ct_install has a second caller (the end
+# of a successful `start`), and naming the function `install` outright would
+# shadow install(1) for the rest of this script.
+
+# @cmd Prepare the current worktree (deps + configs)
+install() { _noargs install "$@"; ct_install; }
+
+# @cmd Get the worktree root
+main_root() { _noargs main_root "$@"; _ct_main_root; }
+
+# @cmd Get the worktree directory for the given branch
+# @arg    branch!             branch to open
+worktree_for_branch() {
+  local branch="${argc_branch:-}"
+  local worktree
+  worktree="$(_ct_worktree_for_branch "$branch")"
+  if [ -z "$worktree" ]; then
+    echo "ct: Not worktree for branch $branch" >&2
+    return 1
+  fi
+
+  echo "$worktree"
+}
+
+eval "$(argc --argc-eval "$0" "$@")"
