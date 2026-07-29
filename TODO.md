@@ -1,5 +1,5 @@
 # TODO.md
-* Write a CLAUDE.md, make special note of tests
+* Break down cw into some more purpose built commands. A worktree creator, a tmux session manager, and a workspace manager that uses the prior two to set up claude workspaces or general workspaces.
 * Restructure test folder to put all stack tests in a folder
 * Write tests for cw using existing test fixture system
 * Add support for --model on cw
