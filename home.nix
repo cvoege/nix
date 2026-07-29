@@ -95,6 +95,7 @@ in
     ".bin/git-stack" = { source = ./bin/git-stack; executable = true; };
     ".bin/cw" = { source = ./bin/cw; executable = true; };
     ".bin/cnotify" = { source = ./bin/cnotify; executable = true; };
+    ".bin/cwtail" = { source = ./bin/cwtail; executable = true; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
