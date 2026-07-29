@@ -446,19 +446,29 @@ cw_wait() {
   # result event finish the wait instead of hanging it.
   cwtail -f "$log" &
   local tail_pid=$!
-  trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+  # Backstop for a wait that dies before the loop can reap: the pid is
+  # interpolated now, not quoted, because the trap body runs at script exit —
+  # after this function's locals are gone, where `set -u` would abort on the
+  # name and that failure would replace the run's exit status with 1.
+  # shellcheck disable=SC2064  # expanding now is the point, see above
+  trap "kill $tail_pid 2>/dev/null || true" EXIT
+  # Reads $tail_pid from cw_wait through dynamic scoping. Drops the trap so the
+  # normal exit path doesn't signal a reaped (possibly recycled) pid.
+  _cw_wait_stop() {
+    trap - EXIT
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+  }
 
   waited=0
   while :; do
     if status="$(_cw_log_exit "$log")"; then
       sleep 1   # let cwtail render the last few lines before we cut it off
-      kill "$tail_pid" 2>/dev/null || true
-      wait "$tail_pid" 2>/dev/null || true
+      _cw_wait_stop
       return "$status"
     fi
     if [ "$timeout" -gt 0 ] && [ "$waited" -ge "$timeout" ]; then
-      kill "$tail_pid" 2>/dev/null || true
-      wait "$tail_pid" 2>/dev/null || true
+      _cw_wait_stop
       echo "cw wait: timed out after ${timeout}s; $log is still running" >&2
       return 124
     fi
