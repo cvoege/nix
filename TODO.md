@@ -3,3 +3,7 @@
 * Restructure test folder to put all stack tests in a folder
 * Write tests for cw using existing test fixture system
 * Add support for --model on cw
+* code-review-todo.md
+* Consider delegating subagents with lower class model (or having the option to do so) so they work much faster and cheaper
+* Set up for opencode https://opencode.ai/docs/config/#files
+* Seems to take significantly longer than the original, investigate why

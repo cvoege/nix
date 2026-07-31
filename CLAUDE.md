@@ -14,6 +14,10 @@ This is a set of utilities for quickly starting up git worktrees to do work in p
 
 This is a quick tool for sending a desktop notification, primarily on macs. Do not write tests for cnotify.
 
+## claude-home
+
+Claude Code user-level config: subagents in `claude-home/agents`, slash commands in `claude-home/commands`, skills in `claude-home/skills`. `home.nix` symlinks each file into `~/.claude/{agents,commands,skills}`, so edits here need a `home-manager switch` to take effect. Do not write tests for these.
+
 # Tests 
 
 This repo has tests, which can be run with `just test`. Currently there are only tests for `git-stack`, it should stay that way. All tests should pass for whatever you are working on before you call it complete. New features to `git-stack` should have tests. Tests for a specific tool can be run based on file path, e.g. `just test bin/test/git-stack`.

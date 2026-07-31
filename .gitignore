@@ -1,3 +1,5 @@
 .history/
 .vscode/
 secrets
+**/*/.DS_Store
+tmp/
