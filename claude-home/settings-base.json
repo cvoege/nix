@@ -16,9 +16,6 @@
       }
     ]
   },
-  "enabledPlugins": {
-    "datadog@claude-plugins-official": true
-  },
   "skipWorkflowUsageWarning": true,
   "theme": "auto",
   "preferredNotifChannel": "ghostty",
