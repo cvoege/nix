@@ -13,13 +13,31 @@ suppress a candidate because you assume another angle already has it.
 
 ## Process
 
-1. Run the diff command given in the review scope. Read the whole diff.
+1. Read the whole diff. The review scope gives you either a path to the
+   materialized diff — read that file **in full**, it is the artifact every
+   other agent is working from — or a command to regenerate it.
 2. Read the enclosing function for each hunk you care about. Bugs in unchanged
    lines of a touched function are in scope — the change re-exposes them or
    fails to fix them.
 3. Grep out from the diff as your angle requires (callers, shared helpers,
    CLAUDE.md files).
-4. Apply your assigned angle, hunk by hunk. Do not skim.
+4. Work the **concrete hypotheses** list, if your caller gave you one:
+   confirm or refute each with `file:line` evidence. They were derived from
+   this diff by a prior pass, so treat them as leads, not conclusions — some
+   will be wrong, and saying so with evidence is a real result. They are also
+   not a ceiling: anything your angle turns up that isn't listed still counts.
+5. Apply your assigned angle to the rest of the diff, hunk by hunk. Do not
+   skim.
+
+## Running builds, typechecks and linters
+
+You may run a typecheck, lint or test when it would turn a suspicion into hard
+evidence. Rules: use the repo's own package manager and scripts (read
+`package.json` / the lockfile to see which — never `npx`), scope the command as
+narrowly as the tool allows, and time-box it to about 5 minutes. If it's slow,
+needs a build you don't have, or fails for reasons unrelated to this diff: note
+that and move on. **Do not block on it.** Never modify files, install packages,
+or change git state — this is a read-only review.
 
 ## What a candidate is
 
@@ -48,8 +66,16 @@ verify step entirely, and that is the single dominant cause of missed bugs.
 The converse also holds: if you cannot name a failure scenario, you do not have
 a candidate. Do not pad to fill your budget. An empty list is a valid answer.
 
+## Record your dead ends
+
+Alongside your candidates, return **refuted hypotheses**: every claim you
+investigated and ruled out, one line each, naming the code that disproves it.
+This costs you nothing — you already did the work — and a later sweep reads it
+so it doesn't re-litigate what you already killed. An angle that returns zero
+candidates and six well-evidenced refutations has done its job.
+
 ## Output
 
 Structured output only, matching the schema your caller gave you. Respect the
 candidate cap. If you were given no schema, return a JSON array of objects with
-exactly the four fields above.
+exactly the four fields above, plus a separate refuted-hypotheses list.
