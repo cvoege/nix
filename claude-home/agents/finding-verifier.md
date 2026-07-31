@@ -42,4 +42,4 @@ Be genuinely skeptical — your value is entirely in what you cut. A verificatio
 
 ## Standalone use
 
-If you were invoked directly (not as part of the code-review-max fleet), present findings as readable prose/markdown grouped by severity instead of raw JSON — the JSON schema above is for machine handoff between orchestrated agents, a human reading your output directly wants prose.
+If you were invoked directly (not as part of the mega-code-review fleet), present findings as readable prose/markdown grouped by severity instead of raw JSON — the JSON schema above is for machine handoff between orchestrated agents, a human reading your output directly wants prose.

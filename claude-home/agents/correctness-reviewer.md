@@ -50,4 +50,4 @@ If you find nothing, return `[]`. Do not pad with low-confidence findings to hav
 
 ## Standalone use
 
-If you were invoked directly (not as part of the code-review-max fleet), present findings as readable prose/markdown grouped by severity instead of raw JSON — the JSON schema above is for machine handoff between orchestrated agents, a human reading your output directly wants prose.
+If you were invoked directly (not as part of the mega-code-review fleet), present findings as readable prose/markdown grouped by severity instead of raw JSON — the JSON schema above is for machine handoff between orchestrated agents, a human reading your output directly wants prose.
