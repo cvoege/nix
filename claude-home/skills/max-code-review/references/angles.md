@@ -28,6 +28,11 @@ there are uncommitted changes, or the range diff is empty, also run
 `git diff HEAD` and include the working-tree changes in scope — the review often
 runs before the commit. Treat this diff as the review scope.
 
+Also capture the change's **stated intent** — `gh pr view … --json title,body`
+when there's a PR, plus `git log --format='%s%n%b' "$base"..HEAD` — and carry it
+in the scope block. Angle B audits the diff against it. Omit it rather than pad
+it when there's nothing meaningful to quote.
+
 ---
 
 ## Correctness angles
@@ -41,12 +46,25 @@ or platform makes this line wrong? Look for inverted/wrong conditions,
 off-by-one, null/undefined deref, missing `await`, falsy-zero checks,
 wrong-variable copy-paste, error swallowed in catch, unescaped regex metachars.
 
-### Angle B — removed-behavior auditor
+### Angle B — removed-behavior & unfinished-work auditor
 
-For every line the diff DELETES or replaces, name the invariant or behavior it
-enforced, then search the new code for where that invariant is re-established.
-If you can't find it, that's a candidate: a removed guard, a dropped error
-path, a narrowed validation, a deleted test that was covering a real case.
+Your lens is the thing that should be there and isn't. Two passes:
+
+**Removed behavior.** For every line the diff DELETES or replaces, name the
+invariant or behavior it enforced, then search the new code for where that
+invariant is re-established. If you can't find it, that's a candidate: a
+removed guard, a dropped error path, a narrowed validation, a deleted test that
+was covering a real case.
+
+**Unfinished work.** Audit the diff against the "Stated intent" section of the
+review scope, when one is present. For every behavior the author says the
+change delivers, find where the diff actually delivers it. The incomplete
+change is the finding: one of N call sites updated, a helper added but never
+wired in, a TODO/FIXME/stub left on the new path, a flag or option added but
+never read, a promised guard/migration/cleanup missing, a stated scope boundary
+("does not touch X") that the diff crosses. Name which part of the intent is
+unmet and where it should have landed. If the scope carries no stated intent,
+skip this pass — do not invent an intent to audit against.
 
 ### Angle C — cross-file tracer
 
@@ -137,4 +155,5 @@ What the first pass tends to miss:
 > moved/extracted code that dropped a guard
 > or anchor; second-tier footguns (dataclass default evaluated once, `hash()`
 > non-determinism, lock-scope shrink, predicate methods with side effects);
-> setup/teardown asymmetry in tests; config defaults flipped.
+> setup/teardown asymmetry in tests; config defaults flipped; pieces of the
+> stated intent the diff promises but never delivers.
