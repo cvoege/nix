@@ -18,7 +18,7 @@ export const meta = {
 // Specialize exists because the inline (Agent-tool) path gets per-angle
 // specialization for free: the orchestrating model reads the diff and writes
 // each finder's prompt itself, so Angle D arrives already told "prove or
-// disprove that ALEPH_FORMULA_REGEX.test() with a /g flag returns alternating
+// disprove that FOO_PATTERN.test() with a /g flag returns alternating
 // false, here is the file". A fixed template can't do that, so we buy it back
 // with one agent that turns the diff into concrete per-angle hypotheses and
 // read lists. Without it the workflow path is measurably weaker than inline.
@@ -613,7 +613,7 @@ const spec = await agent(
   '## Angles\n' +
   FINDERS.map(f => '### ' + f.label + '\n' + f.text).join('\n') + '\n' +
   '## What a good hypothesis looks like\n' +
-  'Name real symbols, files and line numbers from this diff, and phrase it so the finder can confirm or refute it with evidence. Not "check for regex bugs" but "prove or disprove: ALEPH_FORMULA_REGEX in apps/x/formulaUtils.ts has the /g flag and isAlephFormula switched from .match() to .test(), so lastIndex persists across calls and alternating calls return a wrong false — find every call site and give the exact call sequence".\n\n' +
+  'Name real symbols, files and line numbers from this diff, and phrase it so the finder can confirm or refute it with evidence. Not "check for regex bugs" but "prove or disprove: FOO_PATTERN in src/utils/fooUtils.ts has the /g flag and isFoo switched from .match() to .test(), so lastIndex persists across calls and alternating calls return a wrong false — find every call site and give the exact call sequence".\n\n' +
   'Give each angle 3-8 hypotheses and the paths it should open, most important first. Bias toward the parts of the diff that look load-bearing, subtle, or under-tested. It is fine — expected, even — for two angles to point at the same code for different reasons.\n\n' +
   'If the scope carries a "Stated intent" section, read the diff against it and turn every promise you cannot immediately see delivered into a hypothesis for angle-B — name the promise and the file the delivery should be in ("the description says all callers were updated; prove or disprove that every caller of renderRow in src/ passes the new arg"). Do not resolve these yourself; the finder does.\n\n' +
   'The cleanup angles get the same treatment as the correctness ones: quote the governing CLAUDE.md rule inside the lens it applies to, and name the specific helper, duplicated block, or hot path the lens should look at. A generic cleanup lens returns generic cleanup.\n\n' +

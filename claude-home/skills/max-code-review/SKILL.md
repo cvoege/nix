@@ -244,12 +244,11 @@ Not this:
 
 This:
 
-> Prove or disprove: `ALEPH_FORMULA_REGEX` in
-> `apps/gs-addin/src/client/utils/formulaUtils.ts` carries the `/g` flag, and
-> `isAlephFormula` changed from `!!s.match(...)` to
-> `Boolean(REGEX.test(s))` — `.test()` advances `lastIndex` on a global regex,
-> so alternating calls return a wrong `false`. Grep every call site and give
-> the exact call sequence that breaks.
+> Prove or disprove: `FOO_PATTERN` in `src/utils/fooUtils.ts` carries the `/g`
+> flag, and `isFoo` changed from `!!s.match(...)` to
+> `Boolean(FOO_PATTERN.test(s))` — `.test()` advances `lastIndex` on a global
+> regex, so alternating calls return a wrong `false`. Grep every call site and
+> give the exact call sequence that breaks.
 
 Give each angle 3–8 hypotheses plus an explicit **"files to open on disk"**
 list, most important first. Two angles pointing at the same code for different
