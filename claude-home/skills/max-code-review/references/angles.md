@@ -33,6 +33,13 @@ when there's a PR, plus `git log --format='%s%n%b' "$base"..HEAD` — and carry 
 in the scope block. Angle B audits the diff against it. Omit it rather than pad
 it when there's nothing meaningful to quote.
 
+Where a **Linear** ticket is referenced (PR title `(CORE-1234)`, a `Closes`
+line, a linear.app URL, or the branch name), read it via the Linear MCP
+`get_issue` tool — load it with `ToolSearch` first, skip `-0000` placeholders,
+and skip entirely when no Linear tool is available. Carry its requirements as a
+section separate from stated intent: the ticket is what was *requested*, and an
+uncovered requirement is usually a sibling PR's job, not a defect.
+
 ---
 
 ## Correctness angles
@@ -65,6 +72,14 @@ never read, a promised guard/migration/cleanup missing, a stated scope boundary
 ("does not touch X") that the diff crosses. Name which part of the intent is
 unmet and where it should have landed. If the scope carries no stated intent,
 skip this pass — do not invent an intent to audit against.
+
+**Wrong requirement.** When the scope carries a "Tracking ticket" section, check
+the diff against what was actually asked for: a threshold, default, ordering,
+error message, or edge case specified one way and implemented another is a
+finding even when the code is internally consistent. Quote the requirement and
+the line that departs from it. Do NOT report a ticket requirement this diff
+simply doesn't cover — one ticket often spans several stacked PRs, so that is a
+later PR's job unless this change claims to deliver it or contradicts it.
 
 ### Angle C — cross-file tracer
 
