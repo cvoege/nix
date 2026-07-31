@@ -106,6 +106,7 @@ in
     ".claude/commands" = { source = ./claude-home/commands; recursive = true; };
     ".claude/skills" = { source = ./claude-home/skills; recursive = true; };
     ".claude/settings-base.json" = { source = ./claude-home/settings-base.json; };
+    ".claude/CLAUDE.md" = { source = ./claude-home/CLAUDE.md; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a

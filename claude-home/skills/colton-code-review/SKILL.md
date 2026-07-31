@@ -34,7 +34,7 @@ Before spawning any agents, check for and read (if present):
 - `REVIEW.md` at repo root — review-specific instructions, highest priority, overrides default agent behavior below
 - `CLAUDE.md` at repo root and relevant subdirectories — general project conventions
 
-If `REVIEW.md` exists, its content should be prepended to every agent's task prompt as the highest-priority instruction, exactly the way the real product's REVIEW.md works — see `references/review-md-format.md` for the format users write these in.
+If `REVIEW.md` exists, its content should be prepended to every agent's task prompt as the highest-priority instruction, exactly the way the real product's REVIEW.md works.
 
 ## Step 3: Spawn the review agents
 
@@ -87,4 +87,3 @@ This whole thing is yours to edit:
 - **Add/remove angles**: add a new file to `agents/`, following the existing schema (severity/category/subcategory/file/line/summary/reasoning/suggested_fix JSON), then reference it in the effort table above.
 - **Change what counts as `quick`/`standard`/`max`**: edit the table in Step 1.
 - **Change severity calibration globally**: edit the individual agent files' "What to check" sections.
-- **Per-repo tuning without touching this skill**: use `REVIEW.md`, see `references/review-md-format.md`.
