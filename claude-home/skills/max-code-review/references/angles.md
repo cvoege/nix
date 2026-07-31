@@ -13,12 +13,20 @@ subagents or inline.
 
 ## Phase 0 — Gather the diff
 
-Run `git diff @{upstream}...HEAD` (or `git diff main...HEAD` / `git diff HEAD~1`
-if there's no upstream) to get the unified diff under review. If there are
-uncommitted changes, or the range diff is empty, also run `git diff HEAD` and
-include the working-tree changes in scope — the review often runs before the
-commit. If a PR number, branch name, or file path was passed as an argument,
-review that target instead. Treat this diff as the review scope.
+Resolve the diff base in this order, first one that resolves winning:
+
+1. the target passed as an argument (PR number, branch, ref range, file path) —
+   review that instead;
+2. `git stack parent`, when it names a branch that exists (it exits 0 printing
+   `(no parent recorded for '<branch>')` on an untracked branch, so verify with
+   `git rev-parse --verify --quiet refs/heads/<parent>`) — that is the PR base;
+3. `git stack trunk`, which always resolves (defaulting to `main`).
+
+With `git stack` unavailable, fall back to `@{upstream}`, then `main`, then
+`HEAD~1`. Run `git diff "$base"...HEAD` for the unified diff under review. If
+there are uncommitted changes, or the range diff is empty, also run
+`git diff HEAD` and include the working-tree changes in scope — the review often
+runs before the commit. Treat this diff as the review scope.
 
 ---
 

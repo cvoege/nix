@@ -70,16 +70,29 @@ Pick the execution path in this order:
 
 ## Phase 0 — Gather the diff
 
-Run `git diff @{upstream}...HEAD` (or `git diff main...HEAD` / `git diff HEAD~1`
-if there's no upstream) to get the unified diff under review. If there are
+**Resolve the review target in this order — first one that resolves wins:**
+
+1. **The target from the prompt.** A PR number, branch, ref range, or file path
+   passed as an argument. Review that; steps 2–3 don't apply.
+2. **`git stack parent`** — the branch's parent in the `git stack` stack, and
+   the base of its PR. Use it only when it names a branch that exists:
+   ```bash
+   base="$(git stack parent 2>/dev/null || true)"
+   git rev-parse --verify --quiet "refs/heads/$base" >/dev/null || base=""
+   ```
+   The existence check is load-bearing: on an untracked branch `git stack
+   parent` still exits 0, printing `(no parent recorded for '<branch>')`.
+3. **`git stack trunk`** — the repo's trunk/main branch:
+   `base="$(git stack trunk)"`. It always resolves (defaulting to `main`), so
+   this is the terminal fallback.
+
+If `git stack` isn't on PATH at all, fall back to `@{upstream}`, then `main`,
+then `HEAD~1`.
+
+Run `git diff "$base"...HEAD` to get the unified diff under review. If there are
 uncommitted changes, or the range diff is empty, also run `git diff HEAD` and
 include the working-tree changes in scope — the review often runs before the
-commit. If a PR number, branch name, or file path was passed as an argument,
-review that target instead. Treat this diff as the review scope.
-
-In a `git stack` repo with no explicit target, prefer the stack parent
-(`git diff "$(git stack parent)"...HEAD`) over `@{upstream}` — that is the
-actual PR diff.
+commit. Treat this diff as the review scope.
 
 Also pin, before spawning anything:
 
@@ -306,10 +319,10 @@ the target is not a PR, print the findings to the terminal and note that
 `low` is a different shape, not a smaller fan-out. Two turns, no subagents, no
 full-file reads:
 
-**Turn 1 — read.** One tool call: read the unified diff
-(`git diff @{upstream}...HEAD; git diff HEAD` to cover both committed and
-uncommitted changes, or `git diff main...HEAD` / the target passed as an
-argument). Skip test/fixture hunks (`test/`, `spec/`, `__tests__/`,
+**Turn 1 — read.** One tool call: read the unified diff — `git diff
+"$base"...HEAD; git diff HEAD`, to cover both committed and uncommitted
+changes, with `$base` resolved by the Phase 0 order (prompt target, else
+`git stack parent`, else `git stack trunk`). Skip test/fixture hunks (`test/`, `spec/`, `__tests__/`,
 `*_test.*`, `*.test.*`, `fixtures/`, `testdata/`) — test-file changes are not
 reviewed at this level.
 

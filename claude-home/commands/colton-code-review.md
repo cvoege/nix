@@ -37,8 +37,10 @@ number, branch, ref range, path, or free-form scope instruction ("only
 through **verbatim** to the skill; it rides along to every finder, verifier and
 sweep agent as scope guidance.
 
-If the target is empty, use the skill's Phase 0 default: the current branch
-diff, including uncommitted changes. In a `git stack` repo, prefer the stack
-parent over `@{upstream}`.
+If the target is empty, use the skill's Phase 0 fallback order for the diff
+base — `git stack parent` when it names an existing branch (it exits 0 printing
+`(no parent recorded for '<branch>')` on an untracked branch, so check the
+branch exists), otherwise `git stack trunk`. Include uncommitted changes either
+way.
 
 Now run the max-code-review skill end to end with those values.
