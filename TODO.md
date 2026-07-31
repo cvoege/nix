@@ -9,3 +9,4 @@
 * Centralize ai settings and skills in home manager
 * Figure out code review skill/command
 * Prompt code review max with a prompt to try to dig up what each agent does. "Have each agent write out its instructions, thinking, and prompt, in a text file so I can audit what was done.
+* More agent reviewers: dead-code-reviewer, adversarial-reviwer

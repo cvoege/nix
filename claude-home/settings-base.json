@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "model": "opus[1m]",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZED_ENVIRONMENT\" ] && [ \"$CLAUDE_CODE_ENTRYPOINT\" != cli ] && exit 0; \"$HOME/.bin/cnotify\" \"Finished responding\" \"Claude Code\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "datadog@claude-plugins-official": true
+  },
+  "skipWorkflowUsageWarning": true,
+  "theme": "auto",
+  "preferredNotifChannel": "ghostty",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "autoMemoryEnabled": false
+}
