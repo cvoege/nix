@@ -108,12 +108,15 @@ wrapper forwards all the methods the callers actually use.
 
 ## Cleanup angles
 
+The angles above hunt for bugs; the five below hunt for cleanup in the changed
+code. Each gets its own finder, exactly like a correctness angle — one lens per
+agent, never one agent covering the set.
+
 ### Reuse
 
-The angles above hunt for bugs; this one and the next two hunt for cleanup in
-the changed code. Flag new code that re-implements something the codebase
-already has — Grep shared/utility modules and files adjacent to the change,
-and name the existing helper to call instead.
+Flag new code that re-implements something the codebase already has — Grep
+shared/utility modules and files adjacent to the change, and name the existing
+helper to call instead.
 
 ### Simplification
 
@@ -165,10 +168,17 @@ altitude, and conventions findings when the output cap forces a cut.
 
 ## Sweep gap focus (xhigh / max / ultra only)
 
-What the first pass tends to miss:
+Before any of the below: the sweeper gets a **computed coverage table** — the
+changed files no candidate has been raised against. Those come first, because a
+changed file with zero candidates is usually a file nobody opened. Only then work
+the list of things the first pass tends to miss.
 
-> moved/extracted code that dropped a guard
-> or anchor; second-tier footguns (dataclass default evaluated once, `hash()`
-> non-determinism, lock-scope shrink, predicate methods with side effects);
-> setup/teardown asymmetry in tests; config defaults flipped; pieces of the
-> stated intent the diff promises but never delivers.
+What the first pass tends to miss (quoted verbatim into the sweep prompt — keep
+this block byte-identical to `SWEEP_GAP_FOCUS` in the workflow, no blockquote
+markers):
+
+moved/extracted code that dropped a guard
+or anchor; second-tier footguns (dataclass default evaluated once, `hash()`
+non-determinism, lock-scope shrink, predicate methods with side effects);
+setup/teardown asymmetry in tests; config defaults flipped; pieces of the
+stated intent the diff promises but never delivers.
