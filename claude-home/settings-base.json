@@ -23,5 +23,6 @@
     "commit": "",
     "pr": ""
   },
-  "autoMemoryEnabled": false
+  "autoMemoryEnabled": false,
+  "includeCoAuthoredBy": false
 }
