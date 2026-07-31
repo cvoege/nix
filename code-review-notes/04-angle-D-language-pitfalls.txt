@@ -1,0 +1,732 @@
+================================================================================
+04-angle-D-language-pitfalls.txt
+finder Angle D ("language-pitfall specialist")
+Branch under review: colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs
+Repo: /Users/colton/code/monorepo
+Date: 2026-07-30
+================================================================================
+
+================================================================================
+1. PROMPT RECEIVED (verbatim)
+================================================================================
+
+You are finder Angle D ("language-pitfall specialist") — one of 10 parallel finder agents in a maximum-effort code review.
+
+REVIEW SCOPE: the diff of git branch `colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs` vs `trunk`, in repo /Users/colton/code/monorepo.
+- Full unified diff is saved at: /Users/colton/code/monorepo/code-review-notes/00-review.diff  (READ THIS FIRST, in full)
+- Regenerate with: `git diff trunk...HEAD` run from /Users/colton/code/monorepo
+- Languages/frameworks: TypeScript / JavaScript, React, Vitest, a pnpm+turbo monorepo. Target runtimes include Google Apps Script (apps/gs-addin), Excel/Office.js addin, Node server.
+
+YOUR ANGLE: hunt the classic JS/TS pitfalls that this specific diff introduces or re-exposes. Non-exhaustive checklist to apply concretely:
+- **Stateful global RegExp**: a regex literal with the `/g` (or `/y`) flag used with `.test()` or `.exec()` retains `lastIndex` across calls, so alternating calls return alternating results. The diff changes `apps/gs-addin/src/client/utils/formulaUtils.ts` `isAlephFormula` from `!!s.match(ALEPH_FORMULA_REGEX)` to `Boolean(ALEPH_FORMULA_REGEX.test(s))` where `const ALEPH_FORMULA_REGEX = /ALEPH(.*?)GET(INTEGRATION)?DATA\((.*?)\)/g;` is a module-level constant. Prove or disprove the bug: read the file, find every call site of `isAlephFormula` (grep across apps/ and packages/), and describe the exact sequence of calls that produces a wrong `false`. Also check every other `.test(` / `.exec(` / `.match(` in the diff for the same issue (`ARRAY_ARGUMENT_REGEX`, `ALEPH_FORMULA_REGEX` in addin-core utils.ts, `quoteRegex`, `RANGE_REGEX`).
+- **Falsy-zero / empty-string**: `if (serviceResult[sheet.id]?.[cell])` where the value is `[[0]]` or `[['']]`; `if (!parsed || !parsed.alephFormula)` where alephFormula could legitimately be `''`; `if (!alephFormulaArgs)` where `[]` is truthy but `nFormulas === 0`; `.filter((value) => value !== undefined)` vs `.filter(Boolean)`; `narrowedMatches.filter(Boolean)`.
+- **Boolean arithmetic**: `variableDimensionsCount += isVariableDimension ? 1 : 0;` replacing `+= isVariableDimension`.
+- **`Set` identity semantics**: `new Set(parentDimensionTextsSet)` copying a Set; `Array.from(new Set(values))` where values are objects (reference identity, not value identity) — check `measureValuesGrid.flat()` in `processConnectMeasures` and `valuesKeys: new Set<string>()`.
+- **`Object.entries`/`Object.keys` on possibly-undefined**; `Object.keys(dimensionFilterMap[value]).length > 1` where the value is an ARRAY (`Object.keys` of an array gives indices) vs `values.length > 1` in the `New` variant — is the semantic difference between `getColumnDimensions` and `getColumnDimensionsNew` intentional?
+- **`NaN` propagation**: `(lastRowSubrange.cellStart.row ?? NaN) - 1` and `(… .column ?? NaN) + 1` — trace what a `NaN` row/column does downstream in `new Cell({...})`, `DisconnectRange`, `containsRows`/`containsColumns`.
+- **`await` in a loop / missing await / floating promise**: the new `for (const args of alephFormulas) { … await splitCellAndSheet(…) }`; `processRows`/`processColumns` changing from `async () =>` to `() =>`; `Promise.all(alephFormulas.map(async …))`.
+- **Spread-in-reduce O(n^2)** and mutation of an accumulator that is also the seed: `recording.data.input.spreadsheet.sheetRangesValues` used both as reduce seed (`?? {}`) and assignment target.
+- **Async closure over a lazily-initialised cache**: `let sheetsCache` + `getSheetsCached` — is there a race where two concurrent calls each call `getSheets()`? Does it matter?
+- **String vs number coercion** in `parseInt` / `Number(value)` in alephFunction.ts `coerceArg`.
+- **`as unknown as X` / `!` non-null assertions** that hide a real runtime `undefined` (list the ones where the value genuinely can be undefined at runtime).
+- **React**: `@ts-expect-error` above a JSX prop suppresses errors for that prop only — check whether the suppressed mismatch is a real prop-type incompatibility that will misbehave at runtime.
+
+Files to read on disk: /Users/colton/code/monorepo/apps/gs-addin/src/client/utils/formulaUtils.ts ; /Users/colton/code/monorepo/packages/addin-core/src/operations/buildExplores/utils.ts (all of it) ; /Users/colton/code/monorepo/apps/server/src/operations/alephFunction.ts ; /Users/colton/code/monorepo/packages/addin-core/src/entities/*.ts as needed.
+
+MANDATORY NOTE-TAKING (explicit user request): You MUST write a detailed plain-text notes file at
+/Users/colton/code/monorepo/code-review-notes/04-angle-D-language-pitfalls.txt
+using the Write tool, BEFORE returning your final answer. It MUST contain, in this order:
+1. "PROMPT RECEIVED" — the verbatim full text of this prompt.
+2. "WHAT I AM LOOKING FOR"
+3. "GOALS"
+4. "METHOD / HOW I ACCOMPLISHED IT" — chronological log: every command run, every file read (absolute path + line ranges), what you saw, what you concluded. Include dead ends and refuted hypotheses.
+5. "CANDIDATES" — file, line, summary, failure scenario, quoted code evidence.
+
+OUTPUT: return a JSON array of up to 8 candidate findings, each {"file","line","summary","failure_scenario"}. RECALL mode — err on the side of surfacing. If you truly find nothing, return [].
+
+
+================================================================================
+2. WHAT I AM LOOKING FOR
+================================================================================
+
+Classic JS/TS footguns that this diff introduces or re-exposes, specifically:
+
+(a) Stateful global RegExp: `/g` or `/y` regex literal held in a module-level
+    const and used with `.test()` / `.exec()`. `lastIndex` survives across calls,
+    so repeated calls on equivalent inputs alternate true/false. Also: does a
+    polluted `lastIndex` leak into other consumers of the same regex object
+    (`String.prototype.matchAll` reads `lastIndex` from the source regex when it
+    clones it; `String.prototype.match` with /g resets it to 0 first).
+
+(b) Falsy-zero / empty-string truthiness checks introduced by the JS->TS
+    conversion (`if (x)` where x can be 0, '', or []).
+
+(c) Boolean arithmetic rewrites (`+= cond` -> `+= cond ? 1 : 0`).
+
+(d) Set semantics (copying a Set, deduping object references by identity).
+
+(e) `Object.keys` / `Object.entries` on possibly-undefined values, and
+    `Object.keys(arr).length` vs `arr.length` semantic drift.
+
+(f) NaN propagation from `?? NaN` sentinels into geometry/comparison code.
+
+(g) Async pitfalls: `await` in loop, missing await, floating promises,
+    async/non-async signature flips, lazily-initialised caches shared by
+    concurrent awaits.
+
+(h) O(n^2) spread-in-reduce and accumulator/seed aliasing.
+
+(i) Type lies: `as`, `as unknown as`, `!`, and `@ts-expect-error` used to
+    silence a mismatch instead of fixing the root type — especially where the
+    value genuinely CAN be undefined at runtime, or where the only caller is an
+    untyped `.js` file so TS can never catch the lie.
+
+(j) React: `@ts-expect-error` above a JSX attribute.
+
+Repo rules that make some of these hard findings rather than nits
+(/Users/colton/code/monorepo/CLAUDE.md):
+  - "Fix the root type instead of casting. `as any` / `as unknown as X` is rarely
+     the answer."
+  - "Narrow with type guards, not `@ts-expect-error`, casts, or non-null
+     assertions."
+  - "Fix root causes ... Never patch the same value in more than one place."
+
+
+================================================================================
+3. GOALS
+================================================================================
+
+G1. Prove or disprove the `ALEPH_FORMULA_REGEX.test()` `lastIndex` bug with an
+    executable repro, and enumerate every call site so the blast radius is
+    concrete (not hand-wavy).
+G2. Check every other regex in the diff (`ARRAY_ARGUMENT_REGEX`,
+    `ARRAY_ARGUMENT_STRICT_REGEX`, `quoteRegex`, `RANGE_REGEX`, and addin-core's
+    own copy of `ALEPH_FORMULA_REGEX`) for the same class of bug.
+G3. For every truthiness / Set / Object.keys / NaN / async item on the checklist,
+    diff old-vs-new semantics against `trunk` and record REFUTED vs CONFIRMED,
+    so the review doesn't ship false positives.
+G4. For every `!`, `as`, and `@ts-expect-error` added by the conversion, decide
+    whether the suppressed value can actually be undefined at runtime; and check
+    whether the annotation is checkable at all (i.e. is the caller TS or JS?).
+G5. Write up to 8 ranked candidates with concrete failure scenarios.
+
+
+================================================================================
+4. METHOD / HOW I ACCOMPLISHED IT (chronological)
+================================================================================
+
+--- Step 1: size up the diff -------------------------------------------------
+CMD: wc -l /Users/colton/code/monorepo/code-review-notes/00-review.diff
+     -> 1535 lines.
+CMD: git log --oneline trunk..HEAD  (8 commits: "start", "progress",
+     "Convert packages/addin-core/src/operations/buildExplores/utils.js to
+     typescript", "start addin-components fixes", "combine utils",
+     "expect error", "fix integration and server types", "guh")
+CMD: git diff trunk...HEAD --stat
+     -> 20 files, +489/-366. Core change: utils.js -> utils.ts (66% similarity),
+     newUtils.ts DELETED and its 4 exports moved into utils.ts,
+     packages/global-common-utils/src/connectUtils.ts NEW (Connect types moved
+     out of workbook-utils), SheetWithoutActive added, 2 @ts-expect-error added
+     on JSX props, one fixture recording updated (Sheet4!A1 values added).
+
+--- Step 2: read the whole diff ----------------------------------------------
+READ: /Users/colton/code/monorepo/code-review-notes/00-review.diff lines 1-1250
+READ: /Users/colton/code/monorepo/code-review-notes/00-review.diff lines 1251-1536
+Notable hunks flagged for follow-up:
+  - diff L34-40   gs-addin isAlephFormula: `!!s.match(RE)` -> `Boolean(RE.test(s))`
+  - diff L492-496 addin-core isAlephFormula KEPT `s.match(RE)`  (asymmetry!)
+  - diff L544-554 hasArrayParameters gained `throw new Error('Expected aleph
+                  formula to have args')`
+  - diff L594-596 getSingleAlephFormula gained the same throw
+  - diff L655-662 new `let sheetsCache` + `getSheetsCached`
+  - diff L674-680 splitCellAndSheet now awaits + throws AlephError when the
+                  referenced sheet is missing
+  - diff L692-707 forEach -> for..of with `await` in a nested loop
+  - diff L715-730 reduce seeds gained `?? []` / `?? {}`
+  - diff L750-768 second pass became Promise.all(map(async))
+  - diff L787-789 getRowDimensions gained `getDimensionByValue(dimension)!`
+  - diff L799-803 getColumnDimensions annotated `Record<string, unknown[]>`
+  - diff L826-827 `variableDimensionsCount += isVariableDimension ? 1 : 0`
+  - diff L842-843 `[filterGroup] = filterValues as [FilterGroup]`
+  - diff L950-953 `(lastRowSubrange.cellStart.row ?? NaN) - 1`
+  - diff L1002-1004 `explore.previousRowsCount!`, `e.sheet!.id`
+  - diff L1149-1150 getRowDimensionsNew kept `@ts-expect-error` over
+                  `dimension.value`
+  - diff L9 / L143 two `@ts-expect-error` on JSX props
+
+--- Step 3: G1 — the regex bug ------------------------------------------------
+READ: /Users/colton/code/monorepo/apps/gs-addin/src/client/utils/formulaUtils.ts
+      (whole file, 1-999)
+  L22: `const ALEPH_FORMULA_REGEX = /ALEPH(.*?)GET(INTEGRATION)?DATA\((.*?)\)/g;`
+       module-level, /g flag.
+  L24-27: isAlephFormula -> `Boolean(ALEPH_FORMULA_REGEX.test(s))`
+  L52:  splitAlephFormula -> `Array.from(formulaString.matchAll(ALEPH_FORMULA_REGEX))`
+        <-- the SAME regex object, and matchAll copies lastIndex from it.
+  L93:  buildAlephFormulasMap loops entries and calls isAlephFormula per cell.
+  L908: findArrayAlephFormulaInternal calls isAlephFormula per candidate cell,
+        then L951 calls parseAlephFormulaArraySize -> splitAlephFormula.
+
+CMD: grep -rn "isAlephFormula" over apps/ + packages/ (excluding node_modules,
+     dist, build, lib, *.min.*)
+  -> call sites:
+     apps/gs-addin/src/client/utils/formulaUtils.ts:93, :908
+     packages/addin-core/src/operations/buildExplores/index.js:1245
+     packages/addin-core/src/operations/buildExplores/utils.ts:52 (def), :841
+     packages/frontend-common-components/src/components/Reports/
+       CustomDataTableChart.tsx:263 (ExploresOperations.isAlephFormula)
+     packages/frontend-common-components/src/components/Reports/Workbooks/
+       utils.ts:83 (ExploresOperations.isAlephFormula)
+  NOTE: the frontend-common-components call sites use the ADDIN-CORE export
+  (which still uses `.match`), so they are safe. Only the two gs-addin call
+  sites hit the buggy version.
+  (Dead end: my first grep included dist/minified bundles and produced 1.9MB of
+  noise; re-ran with path/extension filters.)
+
+CMD: wrote and ran /private/tmp/.../scratchpad/repro.mjs under node.
+OUTPUT (verbatim):
+  --- NEW (.test with /g) repeated calls, same string ---
+  0 true  lastIndex after = 24
+  1 false lastIndex after = 0
+  2 true  lastIndex after = 24
+  3 false lastIndex after = 0
+  4 true  lastIndex after = 24
+  5 false lastIndex after = 0
+  --- OLD (.match with /g) repeated calls, same string ---
+  0 true lastIndex after = 0    (x6, always true)
+  --- interaction: isAlephFormula() then splitAlephFormula() ---
+  isAlephFormula = true  lastIndex = 24
+  splitAlephFormula = {"nFormulas":0}  lastIndex = 24
+  --- multiple distinct cells (buildAlephFormulasMap loop) ---
+  A1 kept = true
+  A2 kept = false
+  A3 kept = true
+  A4 kept = false
+
+CONCLUSION (CONFIRMED, two independent failure modes):
+  (i) Alternation. `RegExp.prototype.test` on a /g regex starts at `lastIndex`
+      and, on success, sets `lastIndex` to the end of the match; on failure it
+      resets to 0. `String.prototype.match` with /g sets lastIndex = 0 FIRST,
+      which is why the old code was immune. So in the
+      buildAlephFormulasMap loop every second Aleph formula is classified as
+      non-Aleph and dropped ("Ignoring non-Aleph formula").
+  (ii) Cross-contamination into matchAll. Per spec, RegExp.prototype[@@matchAll]
+      clones the regex and copies `lastIndex` from the source. So after a
+      successful `.test()` leaves lastIndex = 24, `splitAlephFormula`'s
+      `matchAll(ALEPH_FORMULA_REGEX)` starts scanning at offset 24 and finds
+      nothing -> `{nFormulas: 0}` -> `parseAlephFormulaArraySize` returns null ->
+      findArrayAlephFormulaInternal's cache-miss branch (L949-984) can never
+      determine an array formula's output size.
+
+CMD: checked for a test that would have caught it:
+     find apps/gs-addin -name "*.test.*"
+     -> /Users/colton/code/monorepo/apps/gs-addin/test/client/utils/formulaUtils.test.ts
+     grep of that file shows only "Sort and merge extents" cases (11 `it`s);
+     isAlephFormula / splitAlephFormula / parseAlephFormulaArraySize are NOT
+     covered. So nothing in CI catches this.
+
+--- Step 4: G2 — the other regexes -------------------------------------------
+READ: /Users/colton/code/monorepo/packages/addin-core/src/operations/buildExplores/utils.ts
+      (whole file, 1-993)
+  L45 ALEPH_FORMULA_REGEX (/g) used only via `s.match(...)` (L54) and
+      `matchAll(...)` (L85) -> `.match` resets lastIndex to 0 and leaves it 0,
+      `matchAll` never mutates the source. SAFE. REFUTED.
+  L49 ARRAY_ARGUMENT_REGEX (/g) used only via `.match(...)` (L130). SAFE.
+  L50 ARRAY_ARGUMENT_STRICT_REGEX — no /g. SAFE.
+  L91 quoteRegex (/g) is declared INSIDE splitAlephFormula, fresh per call, and
+      used with matchAll. SAFE.
+  gs-addin RANGE_REGEX (formulaUtils.ts:165) — no /g. SAFE.
+  alephFunction.ts coerceArg regexes (L61/64/67) — no /g, and
+      isDeprecatedAlephFunction builds `new RegExp(..., 'i')` fresh. SAFE.
+  => Only the one gs-addin site is affected. The asymmetry is itself telling:
+     the two copies of the same function now disagree.
+
+--- Step 5: G3 — refuting / confirming the semantic checklist -----------------
+
+`if (serviceResult[sheet.id]?.[cell])` (utils.ts:298) — REFUTED. The value is
+  `unknown[][]` (a cell grid), so `[[0]]` / `[['']]` are non-empty ARRAYS and
+  therefore truthy. Identical to trunk's
+  `serviceResult[sheet.id] && serviceResult[sheet.id][cell]`.
+
+`variableDimensionsCount += isVariableDimension ? 1 : 0` (utils.ts:424) —
+  REFUTED. `+= true` is `+= 1`, `+= false` is `+= 0`. Behaviour identical.
+
+`new Set(parentDimensionTextsSet)` (utils.ts:372, :927) — REFUTED. `new Set(set)`
+  consumes the iterable and copies the elements; `.has()` works. Redundant, not
+  wrong. Pre-existing in trunk too.
+
+`Array.from(new Set(measureValuesGrid.flat().filter(v => v !== undefined)))`
+  (utils.ts:953) — mostly REFUTED for the object-identity concern (cell values
+  are primitives, not objects). Residual pre-existing smell: empty cells that
+  come back as `''` rather than `undefined` survive the filter and inflate
+  `measureValues`, which can trip the "multiple measures" DrillDownError. Not
+  changed by this diff (pure code move from newUtils.ts). Not reported.
+
+`(lastRowSubrange.cellStart.row ?? NaN) - 1` (utils.ts:649-650) — REFUTED as a
+  behaviour change. READ /Users/colton/code/monorepo/packages/addin-core/src/entities/Cell.ts
+  L6-L10: `type CellOptions = { id?: string; row?: number; column?: number }`,
+  `row?: number`. So the missing value is `undefined`, and `undefined - 1` is
+  already NaN in trunk. `?? NaN` is an exact no-op. (It WOULD have changed
+  behaviour if row could be `null`, since `null - 1 === -1`; it can't.) Left as
+  a sentinel-style nit only, not a candidate.
+
+`narrowedMatches.filter(Boolean)` (utils.ts:711) — REFUTED at runtime (drops the
+  `undefined`s correctly). Type-only wart: `filter(Boolean)` does not narrow, so
+  the declared return type still admits `undefined`. Unchanged from trunk.
+
+`processRows`/`processColumns` `async () =>` -> `() =>` (utils.ts:777, :801) —
+  REFUTED. Both still return the `Promise.all(...)` and are consumed by
+  `await Promise.all([...])` at L825. The only difference is that a *synchronous*
+  throw (e.g. `Object.values(undefined)`) now escapes at the call site instead of
+  becoming a rejected promise; since the enclosing function is `async`, callers
+  see a rejected promise either way.
+
+`await` inside the new nested `for..of` (utils.ts:254-266) — REFUTED as a
+  correctness issue, and the "no need for Promise.all" comment is accurate: the
+  only await is `getSheetsCached()`, which resolves from a module-local cache
+  after the first hit. Concurrency note: the SECOND pass (L291-309) calls
+  `splitCellAndSheet` concurrently via `Promise.all`, so two calls could both see
+  `!sheetsCache` — but by then pass 1 has already warmed it for exactly the same
+  arg list, so the double-fetch cannot happen. Worst case it would be a
+  duplicated idempotent read anyway.
+
+Spread-in-reduce / seed aliasing (utils.ts:273-286) — REFUTED for aliasing. The
+  reducer returns a NEW object each step (`{...acc, ...}`), so the seed
+  (`recording...sheetRangesValues ?? {}`) is never mutated in place; the result
+  is assigned back afterwards. O(n^2) in the number of sheets — negligible, and
+  identical to trunk.
+
+`coerceArg` Number()/parseInt coercion (alephFunction.ts:57-75) — REFUTED. The
+  guard regex `/^-?\d+(\.\d+)?$/` is anchored and non-global; `Number(value)` on
+  a string matching it is exact. `!isRef` = quoted = return the string verbatim,
+  which matches the doc comment.
+
+--- Step 6: trunk comparison for the throw/undefined items -------------------
+CMD: git show trunk:packages/addin-core/src/operations/buildExplores/utils.js
+     | sed -n '30,140p'
+  - trunk isAlephFormula used `Boolean(s.match(...))` -> the gs-addin copy is the
+    one that diverged.
+  - trunk splitAlephFormula ALREADY early-returned `{ nFormulas: arr.length }`
+    with NO `alephFormulaArgs` key, so trunk's
+    `hasArrayParameters` did `undefined.some(...)` -> TypeError. The new explicit
+    `throw new Error('Expected aleph formula to have args')` therefore replaces a
+    TypeError with a clearer Error. NOT a regression, but STILL a reachable
+    crash on a real user input, and it is now written as if unreachable.
+CMD: git show trunk:...utils.js | sed -n '160,215p'
+  - trunk splitCellAndSheet: `internalSheet = getSheets().find((s) => s.name === sheetName);`
+CMD: grep -n "export const getSheets" packages/addin-core/src/data-access/index.ts
+  -> L59: `export const getSheets = (): Promise<Sheet[]> => {`
+  => trunk called `.find` on a PROMISE. Cross-sheet references
+     (`Sheet4!A1`) always threw `TypeError: ... .find is not a function` on
+     trunk. The branch genuinely FIXES that (and that is why the fixture
+     recording had to gain `Sheet4: { A1: [[...]] }`). Good change — recorded so
+     the review doesn't mistake the new `await` for churn. It does, however, mean
+     `serviceResult` can now legitimately contain sheet ids other than the active
+     sheet's, which is what makes the `idToSheetMap[id].name` deref newly
+     interesting (see candidate 7).
+
+--- Step 7: G4 — are the annotations/assertions checkable, and true? ----------
+READ: /Users/colton/code/monorepo/packages/addin-core/src/entities/Table.ts L120-194
+  getDimensionByAnyMatch  -> Dimension | undefined  (Array.prototype.find)
+  getDimensionByValue     -> Dimension | undefined
+  getDimensionByText      -> Dimension | undefined
+  getMeasureByText        -> Dimension | undefined
+CMD: grep -rn "getColumnDimensions|getRowDimensions(" across apps/ + packages/
+  -> the ONLY callers of getColumnDimensions / getRowDimensions are
+     packages/addin-core/src/operations/buildExplores/index.js:277, :601, :605.
+     index.js is still JavaScript => the new parameter annotations on those two
+     functions are UNCHECKED. Whatever they say, nothing verifies it.
+READ: packages/addin-core/src/operations/buildExplores/index.js L235-290 and
+      L538-628
+  L242-265: `dimensionFilterMap[dimensionOption.value] = { [value]: [filter] }`
+  L570:     `dimensionFilterMap[dimensionOption.value] = { value: [filter] };`
+  L578-590: `filterMap[value] = [filter]; ... dimensionFilterMap[...] = filterMap;`
+  => the runtime shape is `Record<string, Record<string, Filter[]>>`, an OBJECT
+     of value -> Filter[], NOT an array.
+  => `getColumnDimensions(table, dimensionFilterMap: Record<string, unknown[]>)`
+     (utils.ts:382) is a FALSE annotation, and the SAME object is annotated
+     `Record<string, Record<string, FilterGroup['body']>>` on getFilterGroup
+     (utils.ts:408) twenty lines away. CONFIRMED candidate.
+     `Object.keys(dimensionFilterMap[value]).length > 1` happens to work for both
+     shapes (Object.keys of an array yields its indices), which is exactly why
+     nobody noticed.
+READ: packages/addin-core/src/entities/FilterGroup.ts L1-60
+  `type FilterGroupBody = (FilterGroup | Filter<FilterValue>)[]`
+  `static parse(...): FilterGroup | Filter<FilterValue>`  <-- the codebase
+  already acknowledges elsewhere that a "filter group" may be a bare Filter.
+  => `[filterGroup] = filterValues as [FilterGroup]` (utils.ts:446) is a false
+     cast: index.js only ever puts `new Filter(...)` instances in there, so
+     getFilterGroup's inferred `FilterGroup` return type is wrong.
+     CONFIRMED candidate (currently latent).
+READ: packages/addin-core/src/entities/Explore.ts (grep)
+  L345-346: `previousRowsCount?: number | undefined; previousColumnsCount?: number | undefined;`
+  L442-443: assigned straight through, no default.
+  => `explore.previousRowsCount!` (utils.ts:729) genuinely can be undefined ->
+     `start + undefined` = NaN -> containsRows/containsColumns false ->
+     findExploreInRange silently returns undefined. Pre-existing behaviour; the
+     `!` documents-away a real case. Noted, ranked below the cut.
+READ: packages/addin-core/src/operations/buildExplores/index.js L800-870
+  `dimToValuesMap` keys come from `explore.rowDimensions` / `explore.columnDimensions`
+  (i.e. from metadata parsed out of the sheet), while the lookups run against
+  `explore.table`'s CURRENT dimensions. A dimension renamed/removed on the model
+  after the explore was written => `getDimensionByAnyMatch` returns undefined =>
+  `filters` contains undefined => `dimension.value` at utils.ts:931 throws.
+  => the `@ts-expect-error` at utils.ts:930 hides a live TypeError. CONFIRMED
+     candidate (moved verbatim from newUtils.ts, so pre-existing, but it is in
+     the added lines of this diff and the sibling `getRowDimensions` got a `!`
+     for the identical hazard).
+CMD: grep -n "recording" packages/addin-core/src/operations/buildExplores/index.js
+  L1366: `recording = undefined,`   (default parameter)
+  L185-188 and L964-967: `recording` threaded into
+  getTablesAndCleanCellReferences / parseAndCleanAlephFormula.
+READ: apps/addin-components/src/hooks/useDrillDown.jsx L1-140
+  L61-75: `drillDownRecording` is only built `if (recordDrillDown)`, otherwise it
+  stays `undefined` and is passed as `recording`.
+  L72: `sheets: await spreadsheetService.getSheets()` -> ALL sheets, which is why
+  candidate 7 is currently masked in practice.
+  => utils.ts:208 `recording: ExploreRecording` (required, non-nullable) is a
+     type lie; the body's own `if (recording)` at L272 proves it.
+     CONFIRMED candidate.
+
+--- Step 8: G4 — the two @ts-expect-error JSX props --------------------------
+READ: packages/frontend-common-components/src/components/ActionButtons/
+      DrilldownByOptionsModal.tsx L1-80
+  Only reads `elem.prettyName` and `elem.name` -> present on both
+  ServerTable['dimensions'] entries and addin-core `Dimension`. No runtime
+  field-access hazard from the type swap.
+READ: apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx (grep around L803)
+  handleGetDrillDownOptions -> ExploresOperations.getDrillDownByOptions(...)
+READ: packages/addin-core/src/operations/buildExplores/index.js L1595-1720 and a
+  grep of L1720-1960: EVERY return does `dimensions: getVisibleDimensions(...)`
+  (utils.ts:398 -> `dimensions.filter(d => !d.hidden).map(d => d.clone())`),
+  which is `Dimension[]` with no undefined holes. So the suppressed mismatch is
+  NOT an "undefined can reach the modal" bug.
+READ: packages/frontend-common-utils/src/profile.ts L285-300
+  `profile<T>(value, fn): (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>`
+  -> profile preserves the return type, so the mismatch is not caused by profile
+  erasing it.
+CMD: pnpm turbo run types:check --filter=@getaleph/addin-components --env-mode=loose
+  -> "Tasks: 10 successful, 10 total", exit 0.
+  IMPORTANT INFERENCE: `@ts-expect-error` is an ERROR when unused, so tsc passing
+  proves there IS a real error on that line being suppressed. But I could not
+  isolate what it is without mutating the tree, and the runtime values are
+  verified-safe. Verdict: real suppression, benign today, but it is a
+  "suppress-forever" hole on a prop whose contract just changed
+  (ServerTable['dimensions'] -> Dimension[]). Ranked below the cut, mentioned in
+  prose rather than as a top-8 candidate.
+
+--- Step 9: fixture sanity check (potential crash for candidate 7) -----------
+CMD: python3 walk of
+  packages/addin-core/integration-tests/fixtures/dev.alephDB.fixturerecordings.json
+  -> 2 recordings gained `sheetRangesValues.Sheet4`; both have
+     `sheets: [{Sheet3, isActive:true}, {Sheet4, isActive:false}]`.
+  => idToSheetMap will contain Sheet4 for the fixtures. The fixture change is a
+     correct consequence of the splitCellAndSheet fix, not a hack.
+CMD: grep sheetRangesValues across src trees
+  -> apps/addin-components/src/pages/Connect/index.tsx:91 has its own local
+     `Record<string, Record<string, unknown>>` annotation (unaffected);
+     packages/addin-core/integration-tests/utils/spreadsheet.ts:84 already had
+     `rangeValuesMap ?? {}` plus an `@ts-expect-error` on L89, so widening
+     `sheetRangesValues` to `unknown[][] | undefined` in transformers/explores.ts
+     does not surface anywhere new. REFUTED as a problem.
+
+--- Step 10: alephFunction.ts ------------------------------------------------
+READ: /Users/colton/code/monorepo/apps/server/src/operations/alephFunction.ts L1-140
+  L102 `if (!parsed || !parsed.alephFormula)`.
+  `parsed.alephFormula` is `arr[0][0]` of a successful regex match, so it can
+  never be `''` -> the falsy-empty-string concern is REFUTED as a live bug.
+  BUT the reason the guard had to be added is real: `splitAlephFormula`'s return
+  type `ParsedAlephFormulaWithoutArgs | ParsedAlephFormulaWithArgs` is NOT a
+  discriminated union (both members declare `nFormulas: number`), so destructuring
+  it in getSingleAlephFormula yields `alephFormula: string | undefined` and
+  `input: string | undefined`. The old JSDoc promised `string`. So this diff
+  weakened a cross-package exported type and the server had to compensate at the
+  call site — plus two `throw new Error('Expected aleph formula to have args')`
+  narrowing crutches inside utils.ts itself (L134, L170). That is the "fix the
+  root type / never patch the same value in more than one place" rule, violated
+  in three places for one missing literal type. CONFIRMED candidates 4 and 5.
+
+--- Step 11: misc items checked and dropped ----------------------------------
+  - apps/gs-addin/src/client/utils/formulaUtils.ts:184
+    `const cellsA1WithAlephFormulas = Object.keys(alephFormulasMap);` where
+    alephFormulasMap is a `Map` -> always `[]`. REAL BUG but PRE-EXISTING and
+    NOT touched by this diff. Mentioned in prose only.
+  - `getColumnDimensions` returns `(Dimension | undefined)[]` while
+    `getColumnDimensionsNew` guards with `if (columnDimension)`. Inconsistent,
+    pre-existing; folded into candidate 2's write-up.
+  - `useDrillDown.jsx` `e` -> `error` rename and `DrillDownButton.tsx`
+    `err` -> `error` rename: pure renames, no behaviour change.
+  - `findConnectedTablesInRange.test.ts` `as unknown as Connect` in test
+    factories: acceptable in tests; noted, not reported.
+  - `packages/workbook-utils/src/connect.ts` -> pure re-export of the types now
+    living in global-common-utils; `ConnectSettings`/`ConnectRowSettings` gained
+    an optional `specialConnectFilter`. No runtime impact.
+
+
+================================================================================
+5. CANDIDATES
+================================================================================
+
+--------------------------------------------------------------------------------
+CANDIDATE 1  [CONFIRMED — executable repro]  HIGH
+file: apps/gs-addin/src/client/utils/formulaUtils.ts
+line: 26
+summary: `isAlephFormula` now calls `.test()` on a module-level `/g` regex, so
+  `lastIndex` persists between calls and the function returns alternating
+  true/false for identical inputs; it also poisons `splitAlephFormula`'s
+  `matchAll` on the same regex object.
+evidence:
+  L22  const ALEPH_FORMULA_REGEX = /ALEPH(.*?)GET(INTEGRATION)?DATA\((.*?)\)/g;
+  L24  export function isAlephFormula(formula: string) {
+  L25    const s = formula.toString();
+  L26    return Boolean(ALEPH_FORMULA_REGEX.test(s));
+  L27  }
+  L52  const arr = Array.from(formulaString.matchAll(ALEPH_FORMULA_REGEX));
+  (trunk / addin-core copy: `return Boolean(s.match(ALEPH_FORMULA_REGEX));` —
+   `String.prototype.match` with /g sets lastIndex = 0 before scanning, which is
+   why the old form was immune.)
+failure scenario A (formulas silently dropped):
+  Select A1:A4 where each cell holds `=ALEPH.LOCAL.GETDATA(A1)`-style formulas.
+  `findScalarAlephFormulas` -> `buildAlephFormulasMap` (L88-106) calls
+  isAlephFormula once per cell. Observed with node:
+  A1 true, A2 false, A3 true, A4 false. A2 and A4 are logged as "Ignoring
+  non-Aleph formula" and never make it into alephFormulasMap, so refresh /
+  drill-down silently skips half the selected Aleph cells.
+failure scenario B (array formulas never sized):
+  findArrayAlephFormulaInternal L908 `if (!isAlephFormula(formula)) continue;`
+  succeeds and leaves lastIndex = end-of-match. L951
+  `parseAlephFormulaArraySize(formula)` -> splitAlephFormula ->
+  `matchAll(ALEPH_FORMULA_REGEX)`, which per spec copies `lastIndex` from the
+  source regex into its clone, so it scans from offset 24 of a 24-char string,
+  finds nothing, returns `{nFormulas: 0}`, and parseAlephFormulaArraySize returns
+  null. Verified: `isAlephFormula = true lastIndex = 24` then
+  `splitAlephFormula = {"nFormulas":0}`.
+notes: no test covers this — apps/gs-addin/test/client/utils/formulaUtils.test.ts
+  only exercises RowExtent sorting/merging. Fix: revert to `s.match(...)`, or drop
+  the `/g` flag (nothing needs multiple matches for a boolean), or reset
+  `ALEPH_FORMULA_REGEX.lastIndex = 0` before each use.
+
+--------------------------------------------------------------------------------
+CANDIDATE 2  [CONFIRMED]  MEDIUM-HIGH
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 382
+summary: The new `dimensionFilterMap: Record<string, unknown[]>` annotation on
+  `getColumnDimensions` contradicts the actual runtime shape
+  (`Record<string, Record<string, Filter[]>>`) and contradicts the annotation the
+  same diff put on `getFilterGroup` (L408) for the exact same object; TS cannot
+  catch it because the only caller is JavaScript.
+evidence:
+  utils.ts:382 export function getColumnDimensions(table: Table, dimensionFilterMap: Record<string, unknown[]>) {
+  utils.ts:386   const isVariableDimension = Object.keys(dimensionFilterMap[value]).length > 1;
+  utils.ts:408 export function getFilterGroup(dimensionFilterMap: Record<string, Record<string, FilterGroup['body']>>) {
+  index.js:570   dimensionFilterMap[dimensionOption.value] = { value: [filter] };
+  index.js:587-590 filterMap[value] = [filter]; ... dimensionFilterMap[dimensionOption.value] = filterMap;
+  index.js:593   const filterGroup = getFilterGroup(dimensionFilterMap);
+  index.js:605   const columnDimensions = getColumnDimensions(table, dimensionFilterMap);
+failure scenario: `Object.keys()` masks the discrepancy today (for an array it
+  returns the indices, so the count matches `.length`). The next reader trusts the
+  annotation and applies the obvious cleanup
+  `dimensionFilterMap[value].length > 1` — for the real Record shape that is
+  `undefined > 1` === false for every dimension, so `getColumnDimensions` returns
+  `[]` and every drill-down loses its column dimensions with no error. Nothing in
+  CI can flag it: index.js is untyped, so the wrong annotation is never checked
+  against a caller.
+
+--------------------------------------------------------------------------------
+CANDIDATE 3  [CONFIRMED]  MEDIUM
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 208
+summary: `recording: ExploreRecording` is declared required and non-nullable on
+  `getTablesAndCleanCellReferences` (and L315 on `parseAndCleanAlephFormula`), but
+  the real caller defaults it to `undefined`; the function's own `if (recording)`
+  guard is now provably-dead per the types.
+evidence:
+  utils.ts:205-209  export async function getTablesAndCleanCellReferences(
+                      alephFormulas: AlephFormulaArgPiece[][],
+                      activeSheet: Sheet,
+                      recording: ExploreRecording,
+                    ): Promise<TableAndCellReference[]> {
+  utils.ts:272        if (recording) {
+  index.js:1366       recording = undefined,
+  index.js:185-188    await getTablesAndCleanCellReferences(..., recording);
+  index.js:964-967    await parseAndCleanAlephFormula(activeSheet, ..., recording);
+  useDrillDown.jsx:61-75  drillDownRecording stays `undefined` unless
+                          recordDrillDown is set (the normal path).
+failure scenario: an engineer (or a `no-unnecessary-condition` lint rule) deletes
+  the "impossible" `if (recording)` guard because the parameter is typed
+  non-nullable. Every ordinary drill-down (recordDrillDown false) then throws
+  `TypeError: Cannot read properties of undefined (reading 'data')` at
+  `recording.data.input.spreadsheet.sheets`. Fix: `recording?: ExploreRecording`.
+
+--------------------------------------------------------------------------------
+CANDIDATE 4  [CONFIRMED reachable]  MEDIUM
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 134
+summary: `hasArrayParameters` throws a bare `Error('Expected aleph formula to have
+  args')` on a reachable user input — a cell with two ALEPH calls and a range
+  argument — because `splitAlephFormula` returns the no-args variant whenever
+  `nFormulas !== 1`.
+evidence:
+  utils.ts:86-88   if (arr.length !== 1) { return { nFormulas: arr.length }; }
+  utils.ts:129-137 function hasArrayParameters(alephFormula: string) {
+                     if (!alephFormula.toString().match(ARRAY_ARGUMENT_REGEX)) return false;
+                     const { alephFormulaArgs } = splitAlephFormula(alephFormula);
+                     if (!alephFormulaArgs) { throw new Error('Expected aleph formula to have args'); }
+  utils.ts:840-844 for (const [cellA1, cellFormula] of Object.entries(formulasMap)) {
+                     if (!isAlephFormula(cellFormula)) continue;
+                     if (hasArrayParameters(cellFormula)) { ... }
+failure scenario: cell contains
+  `=ALEPH.LOCAL.GETDATA(A1:B2,"Dim","Val")+ALEPH.LOCAL.GETDATA(C1,"Dim","Val")`.
+  isAlephFormula -> true; ARRAY_ARGUMENT_REGEX matches `A1:B2`;
+  splitAlephFormula sees arr.length === 2 -> `{nFormulas: 2}` ->
+  `!alephFormulaArgs` -> a raw `Error` escapes buildAlephFormulasMap. Because it
+  is neither a `DrillDownError` nor an `AlephError`, the user gets a generic
+  failure instead of the intended
+  `drilldownErrors.MULTIPLE_ALEPH_GETDATA_IN_FORMULA` message that
+  `getSingleAlephFormula` (utils.ts:156-158) would have produced. (Trunk crashed
+  here too, with `undefined.some is not a function`, so this is not a regression —
+  but the new code presents the branch as an internal invariant when it is
+  actually a user-input path.)
+
+--------------------------------------------------------------------------------
+CANDIDATE 5  [CONFIRMED]  MEDIUM
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 56
+summary: `ParsedAlephFormula` is not a discriminated union (both members declare
+  `nFormulas: number`), so TS cannot narrow on `nFormulas === 1`; the diff
+  compensates with two runtime `throw new Error(...)` crutches inside utils.ts and
+  a third guard added in the server, and it weakens the exported
+  `getSingleAlephFormula` result to `alephFormula: string | undefined`.
+evidence:
+  utils.ts:56-69   type ParsedAlephFormulaWithoutArgs = { nFormulas: number; alephFormula?: undefined; ... };
+                   type ParsedAlephFormulaWithArgs    = { nFormulas: number; alephFormula: string; ... };
+  utils.ts:170-172 if (!alephFormulaArgs) { throw new Error('Expected aleph formula to have args'); }
+  alephFunction.ts:102  if (!parsed || !parsed.alephFormula) {
+failure scenario: the guard in apps/server/src/operations/alephFunction.ts:102
+  conflates "getSingleAlephFormula returned nothing" with "alephFormula is
+  falsy", so any future shape where `alephFormula` is empty-but-parsed is
+  reported to the user as `MALFORMED_FORMULA` / `NOT_ALEPH_FUNCTION` rather than
+  being evaluated. More concretely: the same missing-literal-type is now patched
+  in three separate places (utils.ts:134, utils.ts:170, alephFunction.ts:102),
+  which is the failure mode CLAUDE.md's "never patch the same value in more than
+  one place" is aimed at. Root fix: `nFormulas: 1` on the WithArgs member (or
+  `nFormulas: 0 | number` / an explicit `ok: true` tag) so TS narrows and all
+  three patches disappear.
+
+--------------------------------------------------------------------------------
+CANDIDATE 6  [CONFIRMED false cast, latent]  MEDIUM-LOW
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 446
+summary: `[filterGroup] = filterValues as [FilterGroup]` asserts something that is
+  never true — `filterValues` only ever holds `Filter` instances — so
+  `getFilterGroup`'s inferred `FilterGroup` return type is wrong for the
+  single-dimension case.
+evidence:
+  utils.ts:430   const filterValues: FilterGroup['body'] = [];
+  utils.ts:431   Object.values(filterValuesFilterMap).forEach((values) => filterValues.push(...values));
+  utils.ts:445-447 } else {
+                     [filterGroup] = filterValues as [FilterGroup];
+                   }
+  index.js:564-570 const filter = new Filter({...}); dimensionFilterMap[...] = { value: [filter] };
+  FilterGroup.ts:8  type FilterGroupBody = (FilterGroup | Filter<FilterValue>)[];
+  FilterGroup.ts:42 static parse(...): FilterGroup | Filter<FilterValue>
+failure scenario: with a single non-varying dimension, getFilterGroup returns a
+  `Filter`, not a `FilterGroup`, while its declared type says `FilterGroup`. Any
+  TS consumer that trusts the type and touches `.body` (e.g.
+  `filterGroup.body.push(...)`, as utils.ts:439/444 themselves do) gets
+  `TypeError: Cannot read properties of undefined (reading 'push')`. It's latent
+  today only because the `.body` writes are in mutually-exclusive branches.
+  `FilterGroup.parse` already models this correctly as
+  `FilterGroup | Filter<FilterValue>` — the return type should say the same
+  instead of casting.
+
+--------------------------------------------------------------------------------
+CANDIDATE 7  [CONFIRMED unguarded deref, currently masked]  MEDIUM-LOW
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 283
+summary: `?? []` silences the type error on the `sheets` reduce but leaves
+  `idToSheetMap[id]` genuinely undefined; `.name` is then dereferenced without a
+  guard, and TS types the index access as `Sheet` so it can't warn.
+evidence:
+  utils.ts:273-276  const idToSheetMap = (recording.data.input.spreadsheet.sheets ?? []).reduce<Record<string, Sheet>>(
+                      (acc, sheet) => ({ ...acc, [sheet.id]: sheet }), {},
+                    );
+  utils.ts:281-283  (acc, [id, values]) => ({
+                      ...acc,
+                      [idToSheetMap[id].name]: { ...acc[idToSheetMap[id].name], ...values },
+                    }),
+  transformers/explores.ts:160  sheets?: Sheet[];      // genuinely optional
+failure scenario: a recording whose `spreadsheet.sheets` is absent or stale, or
+  whose sheet list doesn't include a sheet that an Aleph formula references, gives
+  `TypeError: Cannot read properties of undefined (reading 'name')` and kills the
+  whole drill-down. This is newly reachable for non-active sheets because
+  `splitCellAndSheet` now actually resolves `Sheet4!A1` (trunk called
+  `getSheets().find(...)` on an un-awaited Promise and always threw), so
+  `serviceResult` can now be keyed by sheet ids other than the active sheet's.
+  It is masked today only because useDrillDown.jsx:72 records
+  `await spreadsheetService.getSheets()` (all sheets). The `?? []` moved the crash
+  rather than handling it.
+
+--------------------------------------------------------------------------------
+CANDIDATE 8  [CONFIRMED latent TypeError under a suppression]  MEDIUM-LOW
+file: packages/addin-core/src/operations/buildExplores/utils.ts
+line: 930
+summary: The `@ts-expect-error` hides that `filters` is `(Dimension | undefined)[]`
+  — the `if (filter)` guard above only protects the dimensionGroups loop, not the
+  final `.find()` — so `dimension.value` throws for any dimension name that no
+  longer exists on the table. The sibling `getRowDimensions` papers over the same
+  hazard with a `!` (L357).
+evidence:
+  utils.ts:909  const filters = Object.keys(dimensionFilterMap).map((dimension) => table.getDimensionByAnyMatch(dimension));
+  utils.ts:912-913 filters.forEach((filter) => { if (filter) {        // guarded here only
+  utils.ts:928-932 return table.dimensions.filter(
+                     ({ text, value }) =>
+                       // @ts-expect-error Table is yet not fully typed...
+                       !filters.find((dimension) => dimension.value === value) && !parentDimensionTexts.has(text),
+                   );
+  utils.ts:357  const filters = Object.keys(dimensionFilterMap).map((dimension) => table.getDimensionByValue(dimension)!);
+  Table.ts:133-149 getDimensionByAnyMatch -> Dimension | undefined (Array#find)
+failure scenario: `dimToValuesMap`'s keys come from `explore.rowDimensions` /
+  `explore.columnDimensions` — dimensions read out of metadata written into the
+  sheet earlier (index.js:821-836) — while the lookup runs against the table's
+  CURRENT dimensions. Rename or delete a dimension in the model and re-drill an
+  existing explore: `getDimensionByAnyMatch` returns undefined, `filters` contains
+  a hole, and `dimension.value` throws
+  `TypeError: Cannot read properties of undefined (reading 'value')`, failing the
+  entire drill-down instead of just ignoring the unknown dimension. Correct fix is
+  a guard (`dimension?.value === value`) or filtering the array once —
+  the `@ts-expect-error` is precisely the pattern CLAUDE.md forbids.
+
+--------------------------------------------------------------------------------
+BELOW THE CUT (surfaced in prose, not in the top-8 JSON)
+--------------------------------------------------------------------------------
+- utils.ts:729  `start + explore.previousRowsCount!` — Explore.ts:345 declares it
+  `number | undefined` with no default, so this silently yields NaN and makes
+  findExploreInRange return undefined instead of failing loudly. Same for
+  `e.sheet!.id` (L715). Behaviourally unchanged from trunk.
+- utils.ts:649-650 `?? NaN` — an exact no-op vs trunk's `undefined - 1`, but NaN
+  as a sentinel into `new Cell({...})` / `containsRangeColumns` is worth a
+  comment or an early return.
+- apps/addin-components/.../ActionButtonsWrapper.tsx:124 and
+  apps/web-ui/.../Workbook.tsx:1011 — both `@ts-expect-error`s ARE suppressing a
+  real error (tsc passes, and an unused `@ts-expect-error` is itself an error),
+  but the runtime values all come from `getVisibleDimensions()` so they really are
+  `Dimension[]`. Risk is future drift: the directive keeps suppressing whatever
+  error appears on that prop.
+- apps/gs-addin/src/client/utils/formulaUtils.ts:184
+  `Object.keys(alephFormulasMap)` on a `Map` always returns `[]` —
+  `cellsA1WithAlephFormulas` is dead. PRE-EXISTING, untouched by this diff, but
+  it sits in the same call chain as candidate 1.
+- utils.ts:953 `measureValuesGrid.flat().filter((v) => v !== undefined)` keeps
+  `''` from blank cells, which can trip the "multiple measures" DrillDownError.
+  Pure code move from newUtils.ts.
+- utils.ts:383 `getColumnDimensions` returns `(Dimension | undefined)[]` (it
+  pushes unguarded) while `getColumnDimensionsNew` guards with
+  `if (columnDimension)`. Inconsistent for two functions that are supposed to be
+  the old/new pair.
+- utils.ts:711 `narrowedMatches.filter(Boolean)` does not narrow in TS, so
+  `findConnectedTablesInRange`'s return type still admits `undefined`. Runtime is
+  correct.
+
+================================================================================
+END
+================================================================================

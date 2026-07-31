@@ -105,6 +105,7 @@ in
     ".claude/agents" = { source = ./claude-home/agents; recursive = true; };
     ".claude/commands" = { source = ./claude-home/commands; recursive = true; };
     ".claude/skills" = { source = ./claude-home/skills; recursive = true; };
+    ".claude/workflows" = { source = ./claude-home/workflows; recursive = true; };
     ".claude/settings-base.json" = { source = ./claude-home/settings-base.json; };
     ".claude/CLAUDE.md" = { source = ./claude-home/CLAUDE.md; };
 

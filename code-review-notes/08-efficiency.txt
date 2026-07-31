@@ -1,0 +1,696 @@
+================================================================================
+1. PROMPT RECEIVED (verbatim)
+================================================================================
+
+You are finder angle "EFFICIENCY" — one of 10 parallel finder agents in a maximum-effort code review. Your job is CLEANUP: flag WASTED WORK the diff introduces — redundant computation, repeated I/O, independent operations run sequentially, blocking work added to startup or hot paths, and long-lived objects built from closures that keep a large enclosing scope alive.
+
+REVIEW SCOPE: the diff of git branch `colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs` vs `trunk`, in repo /Users/colton/code/monorepo.
+- Full unified diff is saved at: /Users/colton/code/monorepo/code-review-notes/00-review.diff  (READ THIS FIRST, in full)
+- Regenerate with: `git diff trunk...HEAD` run from /Users/colton/code/monorepo
+- Context: this is a spreadsheet add-in. Spreadsheet API round trips (Google Sheets / Office.js) are the dominant cost; `getSheets()`, `getRangesValues`, `getSelectionValues` all hit the spreadsheet service. Drill-down runs interactively on user click.
+
+The repo CLAUDE.md rule you are enforcing: "`Promise.all` independent awaits — sequential awaits are only for real data dependencies."
+
+Concrete hypotheses to investigate (confirm or refute each, with file:line evidence and the cheaper alternative):
+1. `packages/addin-core/src/operations/buildExplores/utils.ts` `getTablesAndCleanCellReferences`: the diff replaced a synchronous `forEach` with `for (const args of alephFormulas) { for (const arg of args) { … await splitCellAndSheet(…) } }` plus `// oxlint-disable-next-line no-await-in-loop` and the comment "No need to Promise.all since the only async call is cached". Verify: is the FIRST call actually uncached (cache miss → one real `getSheets()` I/O inside the loop)? How many sequential microtask ticks does this add for a large selection (hundreds of formulas × several args)? Would hoisting `const sheets = await getSheets()` once, before the loop, remove the async entirely?
+2. Same function: `splitCellAndSheet` is now invoked TWICE per ref arg — once building `refRanges`, once in the final `Promise.all(alephFormulas.map(async …))`. Quantify the duplicated parsing work (string split + array `.find` over all sheets, per arg, per formula) and propose reusing the first pass's result. Note the `.find((s) => s.name === sheetName)` is O(#sheets) per arg → O(args × sheets).
+3. Same function, recording block: `Object.entries(serviceResult).reduce((acc, [id, values]) => ({ ...acc, … }), …)` and `sheets.reduce((acc, sheet) => ({ ...acc, [sheet.id]: sheet }), {})` — spread-in-reduce is O(n²) allocation. Confirm both instances (one is pre-existing, one is touched by the diff) and give the O(n) form. Is this on the interactive drill-down path or only when recording?
+4. `getProcessedConnectedTableForDrillDown`: `processFilters`, `processRows`, `processColumns`, and `processConnectMeasures` — are they awaited in parallel or sequentially? Read the real code at the end of the function. Each does spreadsheet I/O. If sequential, that is 4 serial round trips on a user click.
+5. `processConnectMeasures` (moved into utils.ts by this PR) calls `getSelectionValues(connectedTable.sheet, measureRange)` — one round trip per connected table. Check whether the caller loops over connects, producing N serial round trips, and whether the diff made that better or worse.
+6. `packages/frontend-common-components` now imports `Dimension` from `@getaleph/addin-core` (previously it imported only a TYPE, `ServerTable`, from `@getaleph/workbook-utils`). `Dimension` is a runtime CLASS. Check whether the import is type-only in practice (`import { Dimension }` without the `type` keyword) and whether that pulls the entire `@getaleph/addin-core` package into the frontend-common-components bundle at build time. Look at the package's bundler config (rsbuild/vite/tsup), `package.json` `sideEffects`, and whether `verbatimModuleSyntax`/`importsNotUsedAsValues` is on. The same question for `import { Connect } from '@getaleph/global-common-utils'` newly added to `packages/addin-core/tests/.../findConnectedTablesInRange.test.ts` and `import { CellValue, Connect, Sheet, SheetWithoutActive } from '@getaleph/global-common-utils'` in utils.ts — are these type-only imports that should use `import type`? Check the repo's existing convention (grep for `import type` usage in the same packages) and whether an eslint/oxlint rule (`consistent-type-imports`) is configured.
+7. `let sheetsCache` + `getSheetsCached` closure inside `getTablesAndCleanCellReferences` — does this closure outlive the call (is it returned/stored anywhere)? If not, refute the memory concern explicitly. But DO check whether `getSheets()` results are already cached at a lower layer (read `packages/addin-core/src/data-access/index.ts` `getSheets` and the SpreadsheetService implementations) — if so, the new local cache is redundant work/state.
+8. The two integration fixture files gained entries — check the fixture file size (`ls -la`) and whether adding to a ~150k-line JSON fixture is a meaningful CI cost. Low priority; only report if notable.
+
+MANDATORY NOTE-TAKING (explicit user request): You MUST write a detailed plain-text notes file at
+/Users/colton/code/monorepo/code-review-notes/08-efficiency.txt
+using the Write tool, BEFORE returning your final answer. It MUST contain, in this order:
+1. "PROMPT RECEIVED" — the verbatim full text of this prompt.
+2. "WHAT I AM LOOKING FOR"
+3. "GOALS"
+4. "METHOD / HOW I ACCOMPLISHED IT" — chronological log: every command run, every file read (absolute path + line ranges), what you saw, what you concluded. Include dead ends and refuted hypotheses.
+5. "CANDIDATES" — file, line, summary, failure scenario, quoted code evidence.
+
+OUTPUT: return a JSON array of up to 8 candidate findings, each {"file","line","summary","failure_scenario"}. For this angle, `failure_scenario` must state the CONCRETE COST (what work is wasted, how it scales, the cheaper alternative) rather than a crash. RECALL mode — err on the side of surfacing. If you truly find nothing, return [].
+
+
+================================================================================
+2. WHAT I AM LOOKING FOR
+================================================================================
+
+Wasted work introduced (or newly cemented) by the branch
+`colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs`,
+which converts packages/addin-core/src/operations/buildExplores/utils.js -> utils.ts
+and folds newUtils.ts into it.
+
+Specifically:
+  (a) Repeated spreadsheet-service I/O. In this codebase a round trip to the
+      spreadsheet host is the dominant cost:
+        - gs-addin GAS path: google.script.run round trip (tens-to-hundreds of ms)
+        - gs-addin API path: HTTPS fetch to the Sheets REST API
+        - excel-addin: Excel.run + context.sync() (Office.js)
+      So the unit I care about is "how many service calls per user click", not
+      "how many array allocations".
+  (b) Redundant computation: the same value parsed/derived twice.
+  (c) Independent awaits serialized (the CLAUDE.md Promise.all rule).
+  (d) Blocking work added to a hot / interactive path (drill-down is on click).
+  (e) Long-lived closures pinning a big enclosing scope.
+  (f) Newly introduced O(n^2) allocation patterns (spread-in-reduce).
+  (g) Lint/CI budget consumed by avoidable warnings.
+
+================================================================================
+3. GOALS
+================================================================================
+
+G1. Read the full diff (1536 lines) before touching source.
+G2. Confirm/refute each of the 8 supplied hypotheses with file:line evidence.
+G3. For every confirmed item, state the CONCRETE cost and the cheaper form.
+G4. Distinguish "diff introduced this" from "pre-existing, diff merely touched
+    the line" — and say which.
+G5. Trace the real call graph of getTablesAndCleanCellReferences so that any
+    claim about "N round trips" is grounded in an actual caller, not a guess.
+G6. Measure, not assume, the pure-JS costs so I do not overstate CPU findings.
+G7. Explicitly write down refutations so the parent agent does not re-chase them.
+
+================================================================================
+4. METHOD / HOW I ACCOMPLISHED IT  (chronological)
+================================================================================
+
+--- STEP 1: read the diff ---
+
+Read /Users/colton/code/monorepo/code-review-notes/00-review.diff lines 1-1250,
+then lines 1251-1536 (file is 1536 lines; first Read was truncated at the 25k
+token cap, so a second paged Read was required).
+
+In parallel ran:
+  git log --oneline trunk..HEAD | head -30
+  git diff trunk...HEAD --stat
+  (cwd /Users/colton/code/monorepo)
+
+Output: 8 commits (d48c770a02 "start" .. c9ec31c19c "guh"), 20 files changed,
+489 insertions / 366 deletions. Key files:
+  - packages/addin-core/src/operations/buildExplores/{utils.js => utils.ts}  (+428)
+  - packages/addin-core/src/operations/buildExplores/newUtils.ts             (-155, deleted)
+  - packages/addin-core/src/data-access/index.ts  (Sheet -> SheetWithoutActive)
+  - packages/global-common-utils/src/connectUtils.ts (new; Connect type moved
+    out of packages/workbook-utils/src/connect.ts, which now re-exports)
+  - packages/frontend-common-components/.../DrillDownButton.tsx,
+    DrilldownByOptionsModal.tsx  (ServerTable['dimensions'] -> Dimension[])
+  - 2 integration fixture files (+6 lines total: a Sheet4/A1 entry each)
+  - unrelated formatting/curly churn in apps/gs-addin/.../formulaUtils.ts and
+    apps/server/src/operations/alephFunction.ts
+
+Also ran `ls -la packages/addin-core/integration-tests/fixtures/`:
+  dev.alephDB.fixturerecordings.json  = 9,979,059 bytes (9.98 MB)
+  stg.alephDB.fixturerecordings.json  = 3,636,579 bytes
+  -> hypothesis 8 is about a +6-line change to a 9.98 MB file.
+
+--- STEP 2: read the new source in full ---
+
+Read /Users/colton/code/monorepo/packages/addin-core/src/operations/buildExplores/utils.ts
+lines 1-993 (whole file).
+
+Observations recorded at this point:
+  * lines 3-5   : THREE import statements, two of them from the SAME module
+                  ('@getaleph/frontend-common-utils' then
+                   '@getaleph/global-common-utils' twice).
+  * lines 30-36 : '../../transformers' imported TWICE.
+  * lines 38-39 : '../connects' imported TWICE.
+  * line 215    : `let sheetsCache: Sheet[] | undefined;`  -- declared INSIDE
+                  getTablesAndCleanCellReferences, i.e. per invocation.
+  * lines 217-222: getSheetsCached closure.
+  * lines 223-250: splitCellAndSheet is now `async` and awaits getSheetsCached().
+  * lines 253-266: pass 1 -- `for..of` / `for..of` with
+                  `// oxlint-disable-next-line no-await-in-loop`
+                  and the comment "No need to Promise.all since the only async
+                  call is cached".
+  * lines 273-286: recording block, TWO spread-in-reduce accumulators.
+  * lines 291-309: pass 2 -- `return Promise.all(alephFormulas.map(async (args) =>
+                  { const cleanValues = await Promise.all(args.map(async (arg) =>
+                  { ... await splitCellAndSheet(arg, activeSheet) ... })) ... }))`
+                  => splitCellAndSheet called a SECOND time for every ref arg.
+  * lines 355-377 (getRowDimensions) and 907-933 (getRowDimensionsNew): both end
+                  with `const parentDimensionTexts = new Set(parentDimensionTextsSet);`
+                  -- a copy of a Set built ~15 lines earlier and never reused.
+  * lines 825-830: `await Promise.all([processFilters(), processRows(),
+                  processColumns(), processConnectMeasures(connectedTable)])`
+                  => HYPOTHESIS 4 IS REFUTED, they ARE parallel. The diff even
+                  correctly dropped the now-pointless `async` from processRows /
+                  processColumns (they only `return Promise.all(...)`).
+
+In parallel: grep for the getSheets definition ->
+  packages/addin-core/src/data-access/index.ts:59
+  packages/addin-core/src/operations/connectsNew.ts:542 (a local profiled wrapper)
+
+--- STEP 3: read the data-access layer ---
+
+Read /Users/colton/code/monorepo/packages/addin-core/src/data-access/index.ts
+lines 1-210.
+
+  line 59-62:
+      export const getSheets = (): Promise<Sheet[]> => {
+        const spreadsheetService = Configuration.getSpreadsheetService();
+        return spreadsheetService.getSheets();
+      };
+  => BARE PASS-THROUGH. No memoization, no in-flight dedupe, no TTL.
+  => First half of hypothesis 7 answered: there is NO lower-layer cache, so a
+     cache is genuinely warranted here. The question becomes its SCOPE.
+
+Also read lines 440-470 and 625-700 later: getSelectionsValues (PLURAL, line 632)
+is a real batching API that groups Cell/Range/DisconnectRange selections, and
+getSelectionValues (singular, line 637) is just
+`getSelectionsValues([{sheet, selection}])[0]` -> one service call per call.
+Same shape for getRangeValues (line 200) -> getRangesValues -> one service call.
+
+--- STEP 4: compare against trunk (was the old code even working?) ---
+
+  git show trunk:packages/addin-core/src/operations/buildExplores/utils.js
+    | sed -n '1,45p;160,265p'
+
+Trunk had, SYNCHRONOUSLY:
+      internalSheet = getSheets().find((s) => s.name === sheetName);
+`getSheets()` returns a Promise, and Promise has no `.find`, so trunk THREW
+"getSheets(...).find is not a function" on every cross-sheet reference.
+
+CONCLUSION (important for honest framing): the branch FIXES a real latent bug.
+On trunk, any `=ALEPH...GETDATA(Sheet4!A1, ...)` formula failed to parse, fell
+through to the `cellsToRefresh` -> triggerRefreshFormulas -> read-cache fallback
+(which is slower). Also note trunk still *fired* the getSheets() request (the
+promise was created, the network call started) before throwing, so trunk already
+issued the same number of getSheets requests, just as unawaited floating
+promises. So the branch does not ADD network calls on that path; it makes them
+awaited and correct. That said, the newly added cache does not actually
+eliminate the redundancy it was written for -- see CANDIDATE 1.
+
+This also explains the +6 fixture lines: Sheet4!A1 now genuinely gets resolved,
+so the recorded fixture needs its value.
+
+--- STEP 5: trace the callers (the crux) ---
+
+  grep -rn "getTablesAndCleanCellReferences\|parseAndCleanAlephFormula" ...
+  grep -rn "getProcessedConnectedTableForDrillDown\|processConnectMeasures" ...
+
+Real (non-dist) call sites:
+  packages/addin-core/src/operations/buildExplores/index.js:185
+      inside getExploreForScalarAlephFormula -- ONE batched call for ALL formulas.
+      Carries the pre-existing comment
+        "// APP-7010 - We did this already in parseAndCleanAlephFormula?"
+  packages/addin-core/src/operations/buildExplores/index.js:964
+      inside parseScalarAlephFormulas -- PER FORMULA CELL.
+  packages/addin-core/src/operations/buildExplores/index.js:1800
+      inside getDrillDownByOptions -- ONE batched call for ALL formulas.
+  packages/addin-core/src/operations/buildExplores/index.js:877
+      getProcessedConnectedTableForDrillDown(connectTable, range) -- ONE connect.
+
+Read /Users/colton/code/monorepo/packages/addin-core/src/operations/buildExplores/index.js
+lines 150-230, 840-900, 940-1000, 1330-1420, 1770-1830.
+
+The decisive shape, index.js ~938-967 (parseScalarAlephFormulas):
+
+    await Promise.all(
+      Object.keys(alephFormulasMap).map(async (cellA1) => {
+        ...
+        const alephFormula = await parseAndCleanAlephFormula(
+          activeSheet, alephFormulasMap[cellA1], recording);
+        ...
+      }),
+    );
+
+and utils.ts:321 (parseAndCleanAlephFormula):
+
+    const [{ table: tableName, cellReferences }] = await getTablesAndCleanCellReferences(
+      [singleFormula.alephFormulaArgs],   // <-- exactly ONE formula
+      activeSheet, recording);
+
+=> M formula cells in the selection produce M CONCURRENT invocations of
+   getTablesAndCleanCellReferences, each with its OWN fresh `sheetsCache`
+   (utils.ts:215). Any cell whose formula has a `Sheet!Cell` ref therefore
+   triggers its own cold-cache getSheets(). The cache never spans formulas.
+   Then getExploreForScalarAlephFormula (index.js:185) / getDrillDownByOptions
+   (index.js:1800) does ONE MORE batched call -> M+1 total.
+
+Also read /Users/colton/code/monorepo/apps/addin-components/src/hooks/useDrillDown.jsx
+lines 1-140:
+  * line 88: when recording, the hook ALREADY does
+      `sheets: await spreadsheetService.getSheets()`
+    and stores it at recording.data.input.spreadsheet.sheets -- the exact array
+    getTablesAndCleanCellReferences reads at utils.ts:273 to build idToSheetMap,
+    yet the function re-fetches it via getSheetsCached(). Free win in that path.
+  * `recording` is only constructed when `recordDrillDown` is truthy
+    (useDrillDown.jsx:63). recordDrillDown traces to
+    apps/addin-components/src/pages/Home/index.tsx:93 `useState(false)`
+    => RECORDING IS AN OPT-IN DEV/QA TOGGLE, NOT THE DEFAULT INTERACTIVE PATH.
+    This answers the second half of hypothesis 3: the spread-in-reduce blocks
+    are recording-only, so they are cleanup, not a user-facing cost.
+
+--- STEP 6: how expensive is one getSheets() really? ---
+
+  grep -rn "getSheets" over apps/gs-addin/src/client, apps/addin-components/src,
+  packages/addin-core/src, apps/excel-addin/src/services
+
+Read:
+  /Users/colton/code/monorepo/apps/gs-addin/src/client/services/SpreadsheetService.js:26-30
+      export const getSheets = profile('GAS-getSheets', () =>
+        withRetries('getSheets', () => serverFunctions.getSheets()));
+      => one google.script.run round trip per call. NO cache.
+
+  /Users/colton/code/monorepo/apps/gs-addin/src/client/services/ApiSpreadsheetService.ts:579-585
+      export const getSheets = profile('API-getSheets', async () => {
+        const [activeSheet, data] = await Promise.all([
+          getActiveSheet(),
+          getSpreadsheet({ fields: GET_SHEETS_FIELDS }),
+        ]);
+        return toSheets(data.sheets, activeSheet.id);
+      });
+    and line 359 `const getSpreadsheet = async ({fields, ranges}) => { ...
+      const data = await apiFetch(`?${params}`) ... }`  -- a RAW fetch.
+    This file DOES have a generic `createCache` helper (lines 102-155, with
+    in-flight promise dedupe) used for grid props / locale / document
+    properties -- but getSpreadsheet and getSheets do NOT use it.
+    => each getSheets() = ~2 Sheets REST calls, uncached.
+
+  /Users/colton/code/monorepo/apps/excel-addin/src/services/SpreadsheetService.js:395-410
+      export const getSheets = () => withRetries('getSheets', async () => {
+        ... await Excel.run(async (context) => { ... await context.sync(); ... })
+      });
+      => one Office.js context.sync() per call. NO cache.
+
+=> Hypothesis 7, part 2: CONFIRMED there is no lower-layer cache anywhere, in
+   any of the three spreadsheet service implementations. The new cache is not
+   redundant with a lower layer; its problem is purely that it is scoped to one
+   function invocation while the hot caller invokes that function once per
+   formula.
+
+--- STEP 7: measure the pure-JS costs so I do not overstate them ---
+
+Ran a node microbenchmark (scratch, via `node -e`): 30 sheets, 500 formulas x 5
+ref args = 2500 refs, doing split('!') + sheets.find(name match):
+
+  200 reps of ONE pass over 500x5 refs .......... 46 ms   => ~0.23 ms / pass
+  200 reps of await-per-arg (2500 awaits each) .. 33 ms   => ~0.17 ms / pass
+
+CONCLUSION: the double parse and the await-per-arg are sub-millisecond even at
+500 formulas. They are CLEANUP / duplicate-work findings, NOT latency findings.
+I will say so explicitly rather than inflating them. Hypothesis 1's "how many
+microtask ticks" framing: ~1 promise + 1 microtask per ref arg (2500 for the
+500x5 case), all drained inside a single macrotask, so it does not yield to the
+event loop or block paint -- ~0.2 ms of overhead, not a hang.
+
+The REAL cost in this function is the getSheets round trips, not the CPU.
+
+--- STEP 8: bundling / import-type question (hypothesis 6) ---
+
+  cat /Users/colton/code/monorepo/packages/frontend-common-components/package.json
+  ls -la /Users/colton/code/monorepo/packages/frontend-common-components/
+  grep -rn "@getaleph/addin-core" packages/frontend-common-components/src/
+
+Findings:
+  * "@getaleph/addin-core": "workspace:*" is ALREADY in `dependencies`.
+  * addin-core is already imported for RUNTIME VALUES in 20 files, e.g.
+      src/utils/connectErrors.ts:1               import { Constants }
+      src/utils/cube-items.ts:1                  import { CalculatedItemType, RangeDirection }
+      src/components/Connect/ConnectTableBuilder.utils.tsx:1  import { Constants, Utils }
+      src/components/InThisFile/CreateScanEvalButton.tsx:1    import { DataAccess, NoCodeExplore, ExploresOperations }
+      src/components/Reports/utils.ts:2          import { pivotPullData as runPivotPullData, ExploresOperations }
+      src/components/Reports/useBlockData.tsx:2  import { DataAccess, Utils, DATE_SPECIFIER, resolveTableTheme }
+  * build script: `tsup src/index.ts --format esm,cjs --dts --external react`
+    -- tsup externalizes `dependencies`/`peerDependencies` by default, so
+    workspace deps are NOT inlined into dist anyway.
+  * No `sideEffects` field, no rsbuild/vite config in the package (tsup only).
+
+=> HYPOTHESIS 6 REFUTED. `import { Dimension } from '@getaleph/addin-core'` in
+   DrillDownButton.tsx / DrilldownByOptionsModal.tsx adds ZERO incremental
+   bundle weight: the package is already a runtime dependency pulled in by 20
+   other files, and tsup does not bundle it. Dead end.
+
+  grep -rn "consistent-type-imports\|verbatimModuleSyntax\|importsNotUsedAsValues"
+    -> only dev/local/tsconfig.json:12 (unrelated) and one eslint-disable in
+       apps/excel-addin. NOT configured for these packages.
+  grep for `import type` in packages/frontend-common-components/src -> used in
+    ~10 files, so it IS a convention, but unenforced.
+=> the `import { CellValue, Connect, Sheet, SheetWithoutActive }` (utils.ts:5)
+   and `import { Connect }` (findConnectedTablesInRange.test.ts:1) are type-only
+   in practice and would conventionally be `import type`, but nothing enforces
+   it and there is no runtime cost (esbuild elides unused-after-erasure
+   bindings). Style, not efficiency. Folded into the low-severity import
+   finding.
+
+--- STEP 9: lint evidence + CI budget ---
+
+  cat /Users/colton/code/monorepo/.oxlintrc.json (lines 1-80)
+    "no-await-in-loop": "warn"          <- the rule the diff suppresses
+    "no-accumulating-spread": "warn"    <- the spread-in-reduce rule
+    plugins include "import" (=> import/no-duplicates active)
+    NO consistent-type-imports rule.
+
+  ./node_modules/.bin/oxlint --config .oxlintrc.json \
+      packages/addin-core/src/operations/buildExplores/utils.ts
+
+  utils.ts:4:46   import(no-duplicates)
+  utils.ts:35:8   import(no-duplicates)
+  utils.ts:38:37  import(no-duplicates)  '../connects' imported more than once
+  utils.ts:274:26 oxc(no-accumulating-spread)
+  utils.ts:282:9  oxc(no-accumulating-spread)
+  utils.ts:375:16 unicorn(prefer-array-some)
+  utils.ts:759:11 eslint(no-console)
+  utils.ts:847:7  eslint(no-console)
+  utils.ts:931:16 unicorn(prefer-array-some)
+
+  The 3 import/no-duplicates warnings are NET NEW (trunk's utils.js imported
+  each module exactly once). The 2 no-accumulating-spread warnings pre-existed
+  in utils.js but the diff edits both statements.
+
+  Budget check:
+    packages/addin-core/package.json:26
+      "lint": "oxlint --config ../../.oxlintrc.json ./src ./tests --max-warnings=520"
+    oxlint ./src ./tests | grep -c warning  ->  507
+    oxlint ... --max-warnings=520 ; echo $?  ->  0  (passes)
+  => 507/520, only 13 warnings of headroom, and this diff spends 3 of them on
+     mergeable imports.
+
+--- STEP 10: hypothesis 8 (fixtures) ---
+
+dev.alephDB.fixturerecordings.json is 9,979,059 bytes; the diff adds 6 lines
+(2 x a 3-line "Sheet4": {"A1": [["Sage Intacct (Native) | Profit and Loss"]]}
+block), ~120 bytes, ~0.001% of the file. The fixture must grow because the
+Sheet4!A1 reference now actually resolves (see STEP 4).
+=> REFUTED / not notable. Not reported.
+
+--- REFUTED HYPOTHESES, SUMMARY (do not re-chase) ---
+
+H4 REFUTED. utils.ts:825-830 already does
+     await Promise.all([processFilters(), processRows(), processColumns(),
+                        processConnectMeasures(connectedTable)])
+   The diff additionally removed the redundant `async` from processRows and
+   processColumns. This is correct as written.
+
+H5 REFUTED (as stated). processConnectMeasures runs once per drill-down;
+   getExploreForTableRange (index.js:877) handles a single connect and there is
+   no loop over connects. The diff neither improved nor worsened it. (A related
+   but different waste inside the same function IS reported: candidate 5.)
+
+H6 REFUTED. See STEP 8 -- addin-core is already a runtime dependency of
+   frontend-common-components (20 value imports) and tsup externalizes it.
+   Zero incremental bundle cost.
+
+H7 (memory) REFUTED. `sheetsCache` is a plain `let` local to
+   getTablesAndCleanCellReferences (utils.ts:215) and `getSheetsCached` is never
+   returned, stored on an object, registered as a listener, or captured by
+   anything that outlives the call. Both are unreachable once the returned
+   promise settles. No leak, no retained scope.
+H7 (lower-layer cache) REFUTED in the other direction: there is NO lower-layer
+   cache, so the cache is warranted -- but its scope is wrong (candidate 1).
+
+H8 REFUTED. +120 bytes on a 9.98 MB fixture.
+
+H1 PARTIALLY CONFIRMED. The first cross-sheet ref IS a genuine cache miss, so
+   the loop does block on one real getSheets() round trip -- but the microtask
+   count is a non-issue (~0.2 ms for 500x5). Reported as candidate 3, framed
+   around the blocking first iteration and the removable async, not the ticks.
+
+H2 CONFIRMED (candidate 2), but as duplicate work / needless async rather than
+   measurable latency.
+
+H3 CONFIRMED (candidate 4) but recording-only, hence low severity.
+
+================================================================================
+5. CANDIDATES
+================================================================================
+
+--------------------------------------------------------------------------------
+CANDIDATE 1  (highest value)
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 215
+summary: The new `sheetsCache` is scoped to one `getTablesAndCleanCellReferences`
+  invocation, but the hot drill-down caller invokes that function once per
+  formula cell, so the cache never spans formulas and every cell with a
+  cross-sheet reference issues its own `getSheets()` round trip.
+
+evidence:
+  utils.ts:215-222
+      let sheetsCache: Sheet[] | undefined;
+      // Make getting sheets lazy, so it doesn't fire if not necessary
+      const getSheetsCached = async () => {
+        if (!sheetsCache) {
+          sheetsCache = await getSheets();
+        }
+        return sheetsCache;
+      };
+  utils.ts:321-325 (parseAndCleanAlephFormula)
+      const [{ table: tableName, cellReferences }] = await getTablesAndCleanCellReferences(
+        [singleFormula.alephFormulaArgs],       // one formula per call
+        activeSheet, recording);
+  packages/addin-core/src/operations/buildExplores/index.js:938-967
+      await Promise.all(
+        Object.keys(alephFormulasMap).map(async (cellA1) => {
+          ...
+          const alephFormula = await parseAndCleanAlephFormula(
+            activeSheet, alephFormulasMap[cellA1], recording);
+  packages/addin-core/src/data-access/index.ts:59-62   -- bare pass-through, no cache
+  apps/gs-addin/src/client/services/SpreadsheetService.js:26   -- 1 google.script.run per call
+  apps/gs-addin/src/client/services/ApiSpreadsheetService.ts:579 + :359 -- 2 uncached REST calls per call
+  apps/excel-addin/src/services/SpreadsheetService.js:395 -- 1 Excel.run/context.sync per call
+  apps/addin-components/src/hooks/useDrillDown.jsx:88
+      sheets: await spreadsheetService.getSheets(),   // already fetched here!
+  utils.ts:273  (same function reads that very array 60 lines below)
+      const idToSheetMap = (recording.data.input.spreadsheet.sheets ?? []).reduce...
+
+failure scenario / concrete cost:
+  User drills down on a selection of M cells whose formulas use cross-sheet refs
+  (e.g. `=ALEPH.LOCAL.GETINTEGRATIONDATA(Sheet4!A1, "Cons Or Accrual", "Test1")`
+  -- literally the shape in the new fixture entry). parseScalarAlephFormulas
+  fans out M concurrent parseAndCleanAlephFormula calls, each creating a fresh
+  `sheetsCache`, so M cold `getSheets()` calls fire; then
+  getExploreForScalarAlephFormula / getDrillDownByOptions makes one more batched
+  call -> M+1 identical fetches of the same immutable sheet list per click.
+  At M = 50 that is 50 google.script.run round trips, or 100 Sheets REST calls
+  (ApiSpreadsheetService, since `getSpreadsheet` bypasses the file's own
+  `createCache` helper), or 50 Office.js `context.sync()`s -- where 1 suffices.
+  Cheaper: hoist the memo to module scope (or add it inside
+  data-access.getSheets, which is where every consumer would benefit, using the
+  in-flight-promise-deduping `createCache` pattern already in
+  ApiSpreadsheetService.ts:102-155); or pass `sheets` in as a parameter. In the
+  recording path it is free: the list is already sitting in
+  `recording.data.input.spreadsheet.sheets`, which this function already reads.
+  NOTE for honesty: trunk also fired one getSheets per formula (as an unawaited
+  floating promise) before throwing on `.find`, so this is not a new network
+  cost -- but the cache added by this diff does not deliver the dedupe it was
+  written to deliver.
+
+--------------------------------------------------------------------------------
+CANDIDATE 2
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 297
+summary: `splitCellAndSheet` is called a second time for every ref arg in the
+  final pass, re-doing the split + O(#sheets) name lookup that pass 1 already
+  did and discarded; because pass 1 already warmed the cache, pass 2's await is
+  a guaranteed cache hit, so the whole second pass is needlessly async.
+
+evidence:
+  pass 1, utils.ts:253-266
+      const refRanges: { sheet: Sheet; range: string }[] = [];
+      for (const args of alephFormulas) {
+        for (const arg of args) {
+          if (arg.isRef) {
+            const { cell, sheet } = await splitCellAndSheet(arg, activeSheet);
+            refRanges.push({ sheet, range: cell });   // <- only cell+sheet kept, arg association lost
+  pass 2, utils.ts:291-309
+      return Promise.all(
+        alephFormulas.map(async (args) => {
+          const cleanValues = await Promise.all(
+            args.map(async (arg) => {
+              if (arg.isRef) {
+                const { cell, sheet } = await splitCellAndSheet(arg, activeSheet);   // <- second time
+  the lookup being repeated, utils.ts:239
+      const referencedSheet = (await getSheetsCached()).find((s) => s.name === sheetName);
+
+failure scenario / concrete cost:
+  Every ref arg is `String.split('!')`-ed twice (2 array allocations instead of
+  1) and every cross-sheet ref re-runs a linear `sheets.find` -- 2 x (refArgs x
+  #sheets) name comparisons instead of 1 x. Measured: ~0.23 ms per pass at 500
+  formulas x 5 refs x 30 sheets, so the CPU is negligible; the real cost is
+  structural. Because pass 1 visits exactly the same `arg.isRef` set, pass 2's
+  `getSheetsCached()` can never miss, so the `async`/`await`/nested `Promise.all`
+  there buys nothing while allocating 1 promise per formula plus 1 per arg
+  (F + F*A) and converting a formerly-synchronous `.map` into a two-level async
+  fan-out. Cheaper: in pass 1 store the resolved `{cell, sheet}` per arg (e.g. a
+  parallel array or a Map keyed by the arg object) and have pass 2 read it --
+  which makes pass 2 fully synchronous again, removes both `Promise.all` wrappers
+  and removes the need for `splitCellAndSheet` to be async at all.
+
+--------------------------------------------------------------------------------
+CANDIDATE 3
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 257
+summary: The `no-await-in-loop` suppression's justification ("the only async call
+  is cached") is false for the first cross-sheet ref -- that iteration blocks the
+  whole loop on a real `getSheets()` round trip -- and a single hoisted fetch
+  would let the loop and `splitCellAndSheet` be synchronous again.
+
+evidence:
+  utils.ts:253-266
+      for (const args of alephFormulas) {
+        for (const arg of args) {
+          if (arg.isRef) {
+            // No need to Promise.all since the only async call is cached
+            // oxlint-disable-next-line no-await-in-loop
+            const { cell, sheet } = await splitCellAndSheet(arg, activeSheet);
+  .oxlintrc.json:29
+      "no-await-in-loop": "warn"
+
+failure scenario / concrete cost:
+  On the first `Sheet!Cell` arg the cache is empty, so the loop stops and waits
+  for a full spreadsheet round trip (google.script.run / Sheets REST / Office.js
+  sync) before processing any remaining arg -- work that is otherwise pure CPU.
+  Every later iteration then pays a promise + microtask for a value that is
+  already in hand (~0.2 ms total at 500x5, so the tick cost itself is not the
+  issue). Cheaper and lint-clean: do one synchronous pre-scan
+  (`alephFormulas.some(args => args.some(a => a.isRef && a.value.includes('!')))`),
+  fetch `const sheets = await getSheets()` ONCE before the loop when needed, and
+  make `splitCellAndSheet(arg, sheet, sheets)` a plain synchronous function.
+  That deletes the suppression, the loop await, and (with candidate 2) both
+  `Promise.all` wrappers.
+
+--------------------------------------------------------------------------------
+CANDIDATE 4
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 273
+summary: Both accumulators in the recording block rebuild the whole object on
+  every iteration (spread-in-reduce, O(n^2) allocation); oxlint's
+  `no-accumulating-spread` flags both, and the diff edits both statements.
+
+evidence:
+  utils.ts:273-286
+      const idToSheetMap = (recording.data.input.spreadsheet.sheets ?? []).reduce<Record<string, Sheet>>(
+        (acc, sheet) => ({ ...acc, [sheet.id]: sheet }),
+        {},
+      );
+      recording.data.input.spreadsheet.sheetRangesValues = Object.entries(serviceResult).reduce<...>(
+        (acc, [id, values]) => ({
+          ...acc,
+          [idToSheetMap[id].name]: { ...acc[idToSheetMap[id].name], ...values },
+        }),
+        recording.data.input.spreadsheet.sheetRangesValues ?? {},
+      );
+  oxlint output:
+      utils.ts:274:26 oxc(no-accumulating-spread)
+      utils.ts:282:9  oxc(no-accumulating-spread)
+  .oxlintrc.json:  "no-accumulating-spread": "warn"
+
+failure scenario / concrete cost:
+  For S sheets the first reduce allocates S objects and copies S(S+1)/2
+  properties instead of S assignments; the second does the same over the sheets
+  present in `serviceResult` and additionally re-spreads the per-sheet inner
+  object each time. n is only tens of sheets, so absolute cost is small.
+  Mitigating: this whole block is behind `if (recording)`, and `recording` is
+  only built when `recordDrillDown` is on (apps/addin-components/src/hooks/
+  useDrillDown.jsx:63 -> pages/Home/index.tsx:93 `useState(false)`), i.e. an
+  opt-in dev/QA toggle -- NOT the interactive drill-down path. Cheaper O(n):
+  build `idToSheetMap` with a `for..of` and `map[sheet.id] = sheet` (or
+  `Object.fromEntries(sheets.map(s => [s.id, s]))`), and mutate
+  `sheetRangesValues[name] = { ...existing, ...values }` in a loop.
+
+--------------------------------------------------------------------------------
+CANDIDATE 5
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 769
+summary: `getProcessedConnectedTableForDrillDown` issues one spreadsheet service
+  call per filter, per row dimension and per column dimension, even though
+  `getSelectionsValues` / `getRangesValues` exist precisely to batch them into
+  one call. (Pre-existing shape; the diff re-typed these exact lines.)
+
+evidence:
+  utils.ts:769   const value = await getRangeValues(connectedTable.sheet, normalizedRange);      // per filter
+  utils.ts:781   const rowValues = await getSelectionValues(connectedTable.sheet, new Range({...}));  // per row dim
+  utils.ts:805   const columnValues = await getSelectionValues(connectedTable.sheet, new Range({...})); // per column dim
+  utils.ts:950   const measureValuesGrid = await getSelectionValues(connectedTable.sheet, measureRange);
+  packages/addin-core/src/data-access/index.ts:637-645
+      export const getSelectionValues = async (sheet, selection, ...) => {
+        const selectionsValues = await getSelectionsValues([{ sheet, selection }], ...);
+        return selectionsValues[0];
+      };
+  packages/addin-core/src/data-access/index.ts:632  getSelectionsValues (plural) = the batching API
+  packages/addin-core/src/data-access/index.ts:200  getRangeValues -> getRangesValues (singleton wrapper)
+  utils.ts:825-830  the four processors ARE Promise.all'd (so this is fan-out width, not serialization)
+
+failure scenario / concrete cost:
+  Drill-down into a connect with F filters, R row dimensions and C column
+  dimensions costs F + R + C + 1 separate spreadsheet service calls on one user
+  click (e.g. 3 filters + 2 rows + 1 column = 7). They run concurrently, so
+  wall-clock is roughly max() not sum() -- but each is still a distinct
+  google.script.run / Sheets REST / Office.js round trip, which multiplies
+  per-call overhead, retry surface (`withRetries`) and Sheets API quota, and GAS
+  limits concurrent server calls so the fan-out can serialize in practice.
+  Cheaper: collect all the `{sheet, selection}` pairs first and issue ONE
+  `getSelectionsValues([...])`, then slice the result -- the helper already
+  groups by sheet id via `getOptimizedSheetRangesPairsList`
+  (data-access/index.ts:115).
+
+--------------------------------------------------------------------------------
+CANDIDATE 6
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 372
+summary: `const parentDimensionTexts = new Set(parentDimensionTextsSet)` copies a
+  Set that was just built and is never touched again -- a pure wasted allocation,
+  duplicated in both `getRowDimensions` (line 372) and `getRowDimensionsNew`
+  (line 927), both of whose Set initializers this diff edits.
+
+evidence:
+  utils.ts:356  const parentDimensionTextsSet = new Set();          // diff changed `new Set([])` -> `new Set()`
+  utils.ts:372  const parentDimensionTexts = new Set(parentDimensionTextsSet);
+  utils.ts:373-376
+      return table.dimensions.filter(
+        ({ text, value }) =>
+          !filters.find((dimension) => dimension.value === value) && !parentDimensionTexts.has(text),
+      );
+  utils.ts:908  const parentDimensionTextsSet = new Set<string>();   // diff changed `new Set([])` -> `new Set<string>()`
+  utils.ts:927  const parentDimensionTexts = new Set(parentDimensionTextsSet);
+  oxlint: utils.ts:375:16 and utils.ts:931:16 unicorn(prefer-array-some)
+
+failure scenario / concrete cost:
+  Two identical Sets are alive where one would do, and building the copy is an
+  extra O(n) insert pass, on every drill-down that reaches these functions
+  (getRowDimensionsNew is on the interactive path -- index.js:945 and :1773).
+  n is small (a dimension group's members), so this is cleanup rather than
+  measurable latency. Separately, the `filters.find(...)` inside
+  `table.dimensions.filter(...)` is O(dimensions x filters) and should be a
+  precomputed `Set` of filter values plus `.some` (oxlint already warns
+  `prefer-array-some` on both lines, since the result is only used as a boolean).
+  Fix: drop the copy and use `parentDimensionTextsSet` directly.
+
+--------------------------------------------------------------------------------
+CANDIDATE 7  (low)
+file : packages/addin-core/src/operations/buildExplores/utils.ts
+line : 4
+summary: The converted file imports three modules twice each, adding 3 net-new
+  `import/no-duplicates` oxlint warnings to a package that is at 507 of its
+  520-warning budget.
+
+evidence:
+  utils.ts:4-5
+      import { appendAndFilterToFilterGroup } from '@getaleph/global-common-utils';
+      import { CellValue, Connect, Sheet, SheetWithoutActive } from '@getaleph/global-common-utils';
+  utils.ts:30-36
+      import { AddinCoreExploreFilter, AddinCoreExploreFilterGroup,
+               addinCoreFilterToFilterGroup, simpleExploreFilterToAddinCoreFilter,
+      } from '../../transformers';
+      import { SpreadsheetInput } from '../../transformers';
+  utils.ts:38-39
+      import { parseConnectMeasure } from '../connects';
+      import { getConnectWithModifiedDimensionRanges } from '../connects';
+  oxlint: utils.ts:4:46, 35:8, 38:37  import(no-duplicates)   [trunk's utils.js had none]
+  packages/addin-core/package.json:26
+      "lint": "... --max-warnings=520"
+  measured: `oxlint ./src ./tests | grep -c warning` -> 507  (exit 0, 13 spare)
+
+failure scenario / concrete cost:
+  No runtime cost (bundlers dedupe module records), but it burns 3 of the 13
+  remaining warnings in addin-core's lint budget, so the next small change is
+  more likely to trip `--max-warnings` in CI, and it makes the import block
+  harder to scan. Merge each pair. While there, `CellValue`, `Connect`, `Sheet`,
+  `SheetWithoutActive` (utils.ts:5) and `Connect` in
+  packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts:1
+  are used only in type positions and would match the package's existing
+  `import type` convention (e.g. packages/addin-core/src/data-access/index.ts:4-13)
+  -- note no `consistent-type-imports` rule is configured, so this is
+  convention, not enforcement, and carries no bundle cost.
+--------------------------------------------------------------------------------

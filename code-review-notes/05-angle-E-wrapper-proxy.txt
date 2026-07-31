@@ -1,0 +1,689 @@
+================================================================================
+1. PROMPT RECEIVED (verbatim)
+================================================================================
+
+You are finder Angle E ("wrapper / proxy / adapter & type-boundary correctness") — one of 10 parallel finder agents in a maximum-effort code review.
+
+REVIEW SCOPE: the diff of git branch `colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs` vs `trunk`, in repo /Users/colton/code/monorepo.
+- Full unified diff is saved at: /Users/colton/code/monorepo/code-review-notes/00-review.diff  (READ THIS FIRST, in full)
+- Regenerate with: `git diff trunk...HEAD` run from /Users/colton/code/monorepo
+
+YOUR ANGLE: this PR mostly moves/re-exports types and widens signatures across package boundaries. Audit the WRAPPERS, RE-EXPORTS, ADAPTERS and DUPLICATED TYPE DEFINITIONS for correctness — a re-export or a widened alias that no longer describes the real runtime value is the same class of bug as a cache that routes back through the registry.
+
+Concrete targets:
+1. `packages/workbook-utils/src/connect.ts` is now a pure re-export of `ConnectDirection, ConnectSettings, ConnectRowSettings, ConnectDimension, Connect` from `@getaleph/global-common-utils`. Verify: (a) every symbol previously exported from that file is still exported (nothing dropped — e.g. was `ServerTable` re-exported or used from there?); (b) the new definitions are structurally compatible with what workbook-utils consumers pass/receive; (c) `Connect.table: ServerTable` now resolves to global-common-utils' `ServerTable`, not workbook-utils' `useWorkbookTables` `ServerTable` — read BOTH definitions and list the fields that differ; (d) whether this is a "duplicate type in two packages" situation that should have been deduped instead.
+2. `SheetWithoutActive = Omit<Sheet, 'isActive'> & { isActive?: boolean }` in packages/global-common-utils/src/types.ts. Read the full `Sheet` type. Then check: does this alias actually widen anything useful, or is it just `Sheet` with an optional field? Every function in packages/addin-core/src/data-access/index.ts whose parameter was widened from `Sheet` to `SheetWithoutActive` — does the BODY (or anything it calls, e.g. `SpreadsheetService.getRangesValues`, `Configuration.getSpreadsheetService()`) actually read `sheet.isActive`? If it does, the widening lets a caller pass a sheet without `isActive` into code that needs it. Find the read.
+3. `packages/global-common-utils/src/connectUtils.ts` `ConnectSettings` and `ConnectRowSettings` BOTH now declare `specialConnectFilter?: { isOn?: boolean }`. Compare against the real runtime shape used by `hasActiveSpecialConnectFilter` in buildExplores/utils.ts and by the actual connect settings producers/consumers (grep `specialConnectFilter` across apps/ and packages/). Does the declared type omit real fields (e.g. `range`)? The test file passes `{ specialConnectFilter: { range: 'E2:E10', isOn: true } }` and needs `as unknown as Connect` — is that cast hiding a wrong type?
+4. `packages/addin-core/src/entities/Table.ts` now declares `dimensionGroups?: DimensionGroup[]` using global-common-utils' `DimensionGroup`, and the comment says "Set by Object.assign in Entity#set from the server table payload." Read /Users/colton/code/monorepo/packages/addin-core/src/entities/Entity.ts (or wherever `set` lives) and verify the claim, then compare the server payload's dimension-group shape (grep the server model / API response for dimensionGroups) with `DimensionGroup`. Also check the newly added optional fields (`isHyperlink`, `customCalculatedItems`, `createdAt`, `updatedAt`) and whether `CustomCalculatedItem` is defined/exported.
+5. `packages/frontend-common-components` `DrillDownButton` / `DrilldownByOptionsModal` switched their `dimensions` prop type from `ServerTable['dimensions']` to the addin-core `Dimension` CLASS. A class type demands methods, not just data. Check every producer of that prop (`getDrillDownByOptions` implementations in apps/web-ui, apps/addin-components, packages/*) — do they hand over real `Dimension` instances, or plain server JSON? Then check every consumer inside the modal — does it call any `Dimension` method, or only read fields? A class used as a data contract across a package boundary is a candidate.
+6. `packages/addin-core/src/operations/buildExplores/utils.ts` now types `findConnectedTablesInRange(connectedTables: Connect[], …)` with the global-common-utils `Connect`, but the function body reads `connect.rows[..].range`, `connect.columns`, `connect.rowSettings?.specialConnectFilter?.isOn`, and passes `connect` to `getConnectWithModifiedDimensionRanges` and `connectAreaContainsRange`. Check whether the addin-core runtime value is actually an addin-core `ConnectedTable` entity rather than a plain server `Connect` — i.e. is the new annotation lying about the runtime type? Read /Users/colton/code/monorepo/packages/addin-core/src/entities/ConnectedTable.ts and the real call sites.
+
+MANDATORY NOTE-TAKING (explicit user request): You MUST write a detailed plain-text notes file at
+/Users/colton/code/monorepo/code-review-notes/05-angle-E-wrapper-proxy.txt
+using the Write tool, BEFORE returning your final answer. It MUST contain, in this order:
+1. "PROMPT RECEIVED" — the verbatim full text of this prompt.
+2. "WHAT I AM LOOKING FOR"
+3. "GOALS"
+4. "METHOD / HOW I ACCOMPLISHED IT" — chronological log: every command run, every file read (absolute path + line ranges), what you saw, what you concluded. Include dead ends and refuted hypotheses.
+5. "CANDIDATES" — file, line, summary, failure scenario, quoted code evidence.
+
+OUTPUT: return a JSON array of up to 8 candidate findings, each {"file","line","summary","failure_scenario"}. RECALL mode — err on the side of surfacing. If you truly find nothing, return [].
+
+
+================================================================================
+2. WHAT I AM LOOKING FOR
+================================================================================
+
+Type annotations, aliases, re-exports and duplicated type definitions introduced
+by this branch that DO NOT describe the real runtime value that flows through
+them, specifically:
+
+- A re-export that drops a symbol or silently swaps in a different underlying type.
+- A "widened" parameter type (Sheet -> SheetWithoutActive, ConnectedTable -> Connect)
+  whose body, or something it transitively calls, still requires the narrower value.
+- A duplicated type in a second package whose fields have drifted from the real
+  payload (missing fields, wrong optionality, fabricated fields).
+- A class used as a data contract across a package boundary (structural typing
+  demands the methods, producers only have data).
+- `as unknown as X` / `as X` / `!` casts that paper over a mismatch instead of
+  fixing the root type, especially in tests where they neutralise the only
+  shape validation that existed.
+- Export-name collisions created by a new `export * from ...`.
+
+================================================================================
+3. GOALS
+================================================================================
+
+G1. Read the whole diff (1536 lines) before touching anything else.
+G2. For each of the 6 concrete targets: read BOTH sides of the boundary
+    (declared type + real runtime producer/consumer) and decide
+    CONFIRMED / REFUTED with quoted evidence.
+G3. Trace `findConnectedTablesInRange` end-to-end to the real production caller
+    to determine whether the value is a `Connect` or a `ConnectedTable`.
+G4. Determine whether `specialConnectFilter` as declared can express the real
+    payload, and what the `as unknown as Connect` cast in the test is hiding.
+G5. Check for collateral damage from `export * from './connectUtils'`.
+G6. Produce <=8 ranked candidate findings as JSON; write these notes first.
+
+================================================================================
+4. METHOD / HOW I ACCOMPLISHED IT  (chronological)
+================================================================================
+
+[1] Read /Users/colton/code/monorepo/code-review-notes/00-review.diff lines 1-1250
+    (paginated; the tool capped at 25k tokens) and then lines 1251-1536.
+    Ran `git log --oneline trunk...HEAD` + `git diff trunk...HEAD --stat`.
+    20 files changed, 489 insertions / 366 deletions. Core of the PR:
+      - packages/addin-core/src/operations/buildExplores/utils.js -> utils.ts
+      - newUtils.ts deleted, its 4 functions folded into utils.ts
+      - new packages/global-common-utils/src/connectUtils.ts (Connect & friends)
+      - packages/workbook-utils/src/connect.ts becomes a pure re-export
+      - SheetWithoutActive added to global-common-utils/src/types.ts
+      - DrillDownButton / DrilldownByOptionsModal dimensions prop -> addin-core Dimension
+      - two new `@ts-expect-error TYPETODO` suppressions (web-ui + addin-components)
+
+[2] TARGET 1 (workbook-utils/src/connect.ts re-export).
+    - `ls packages/workbook-utils/src/` + `grep -n ServerTable -r packages/workbook-utils/src/`
+    - Read /Users/colton/code/monorepo/packages/workbook-utils/src/useWorkbookTables.ts:1-60.
+      Lines 1-10:
+        import { ServerTable, Dimension, DimensionGroup, OrderCriteria, CustomListCriteria }
+          from '@getaleph/global-common-utils';
+        export type { ServerTable, Dimension, DimensionGroup, OrderCriteria, CustomListCriteria };
+      => REFUTED target 1(c): workbook-utils' `ServerTable` was ALREADY just a
+         re-export of global-common-utils' `ServerTable`. `Connect.table` resolves
+         to the exact same type as before. No field differences at all.
+    - Diff shows the old connect.ts contained ONLY the 5 exported types; all 5 are
+      re-exported. `import { ServerTable } from './useWorkbookTables'` was only an
+      internal import, not a re-export. => REFUTED target 1(a): nothing dropped.
+    - Read /Users/colton/code/monorepo/packages/workbook-utils/src/index.tsx:1-33 —
+      `export * from './connect';` still present, so the public surface is unchanged.
+    - Consumers of the workbook-utils `Connect`:
+      /Users/colton/code/monorepo/packages/frontend-common-components/src/components/InThisFile/types.ts:2
+      /Users/colton/code/monorepo/packages/frontend-common-components/src/components/InThisFile/CopyConnectedTableModal.tsx:13
+      Both only hold it as an opaque payload (`connect: Connect`,
+      `connectedTableToCopy: Connect`); no field access that the move changes.
+      Only real change: `Connect.sheet` `{id;name}` -> `SheetWithoutActive`
+      (= `{id;name;isActive?}`) which is structurally compatible.
+      => target 1(b) OK.
+    - 1(d) duplicate-type question: there are now FOUR parallel definitions of the
+      same concept:
+        packages/global-common-utils/src/connectUtils.ts        `Connect`
+        packages/addin-core/src/entities/ConnectedTable.ts      `ConnectedTable` (class)
+        packages/ui-components/src/components/Connect/types.ts  `ConnectTable`
+        packages/workbook-utils/src/utils.ts:65-78              `WorkbookConnect`
+      The PR promoted one of them to the shared package and pointed addin-core at
+      it instead of deduping. That is what produces candidate C1 below.
+
+[3] TARGET 3 groundwork: `grep -rln specialConnectFilter` over apps/ + packages/
+    (the plain -rn grep blew up to 1.9MB because of e2e fixtures and build/ bundles).
+    Read the two authoritative declarations:
+    - /Users/colton/code/monorepo/packages/addin-core/src/entities/ConnectedTable.ts:20
+        export type SpecialConnectFilter = { id?: string; range: string; isOn: boolean };
+      used at lines 30 and 40 for ConnectRowSettings / ConnectColumnSettings.
+    - /Users/colton/code/monorepo/packages/ui-components/src/components/Connect/types.ts:77-90
+        export type ConnectDirectionSettings = {
+          pull: {...}; push: {...};
+          specialConnectFilter?: { id?: string; isOn: boolean; range: string };
+        };
+      and lines 14-18 `ConnectSettings = { direction; pullEmptyAsZero; pushEmptyAsZero }`
+      -- NO specialConnectFilter on the connect-level settings.
+    - e2e fixtures confirm the runtime shape:
+      apps/web-ui/e2e/fixtures/connect.ts:570
+        rowSettings: { specialConnectFilter: { id: '1742399520377', isOn: true, range: 'B6:B7' } }
+      apps/gs-addin/e2e/fixtures/connect.ts:1363-1364 same.
+    => CONFIRMED target 3: the new declaration
+       `specialConnectFilter?: { isOn?: boolean }` omits `range` and `id` and makes
+       `isOn` optional. And it was ALSO pasted onto `ConnectSettings` where the
+       field does not exist in any producer. -> candidates C2 and C3.
+
+[4] Read /Users/colton/code/monorepo/packages/addin-core/src/entities/ConnectedTable.ts (full, 313 lines).
+    Key facts vs the new global-common-utils `Connect`:
+        ConnectedTable                        Connect (connectUtils.ts)
+        --------------------------------      --------------------------------
+        (no _id)                              _id: string            REQUIRED
+        table?: Table (addin-core class)      table: ServerTable     REQUIRED, plain data
+        dataTable?: string                    dataTable: string      REQUIRED
+        rows: Record<string, ConnectParam>    rows: Record<string, {dimension: ConnectDimension; id; range}>
+          ConnectParam.dimension?: Dimension    dimension REQUIRED, plain object
+        sheet: Sheet                          sheet: SheetWithoutActive
+        methods: clone/deepClone/duplicate/   (none)
+                 serialize/toQuery
+    So `ConnectedTable` is NOT assignable to `Connect` and vice-versa.
+
+[5] TARGET 6 — trace the real runtime value.
+    - `grep -rn findConnectedTablesInRange` -> only production callers are
+      /Users/colton/code/monorepo/packages/addin-core/src/operations/buildExplores/index.js:1421 and :1731
+      (plus the unit test).
+    - Read index.js:1380-1450 and :1700-1760.
+      index.js:1337 JSDoc:  `*  getConnectedTables: () => ConnectedTable[],`
+      index.js:1600 JSDoc:  `@param {() => ConnectedTable[]} params.getConnectedTables`
+      index.js:1420-1421: `const connectedTables = getConnectedTables();
+                           const tablesInRange = await findConnectedTablesInRange(connectedTables, activeSheet, range);`
+      index.js:1731-1737: same, then `const { table } = tablesInRange[0];
+                           return { dimensions: getVisibleDimensions(table.dimensions), ... }`
+    - `grep -n getProcessedConnectedTableForDrillDown|getExploreForTableRange index.js`
+      index.js:1439 `getExploreForTableRange(tableInRange, range, selectedDrillDownByOptions)`
+      index.js:874  `async function getExploreForTableRange(connectTable, range, ...)`
+      index.js:877  `await getProcessedConnectedTableForDrillDown(connectTable, range)`
+      and in the very same new file utils.ts:743 that function is annotated
+      `getProcessedConnectedTableForDrillDown(connectedTable: ConnectedTable, range: Range)`.
+      => THE SAME OBJECT is typed `Connect` at utils.ts:673 and `ConnectedTable`
+         at utils.ts:743. Internal contradiction inside one file.
+    - Read /Users/colton/code/monorepo/packages/addin-core/src/operations/connects.js:455-560:
+        export const getConnectWithModifiedDimensionRanges = async (connectedTable) => {
+          ...
+          const connectedTableClone = connectedTable.deepClone();      <-- CLASS METHOD
+          ...
+          DisconnectRange.parse(connectedTable.rowSettings.specialConnectFilter.range)  <-- `range`
+      utils.ts:697 passes the `Connect`-typed value straight into this function.
+      A plain `Connect` has no `deepClone` -> TypeError. And `.range` is not even
+      in the declared type.
+    - Independent confirmation of the runtime type from TS call sites:
+      /Users/colton/code/monorepo/apps/web-ui/src/pages/BudgetTablePOC/BudgetTablePOC.tsx:378
+        const pullConnectedTablesRef = useRef<ConnectedTable[]>([]);
+        :1209 const getConnectedTables = () => pullConnectedTablesRef.current;
+        :1215 ExploresOperations.getDrillDownByOptions({ getTableByName, getConnectedTables, ... })
+      /Users/colton/code/monorepo/packages/workbook-utils/src/addinCoreUtils.ts:35-61
+        buildConnectsFromWorkbook -> `new ConnectedTable({ ..., table: new Table({... dimensions: ... new Dimension(...)}) })`
+      (web-ui Workbook.tsx:512 uses buildConnectsFromWorkbook, :807 feeds it to
+       getConnectedTables; Workbook.tsx:177 types the state as `unknown[]`.)
+    - Read the generated /Users/colton/code/monorepo/packages/addin-core/dist/index.d.ts:4348-4360
+      (dist is NOT committed - `git ls-files packages/addin-core/dist` is empty - it
+      is a local build of THIS branch), which shows the lie leaking into the
+      package's public types:
+        getDrillDownByOptions: (args_0?: any) => Promise<{
+            dimensions: Dimension$1[];
+            suggestedDimensions: never[];
+            discoveryContext: {
+                ...
+                connectedTable: _getaleph_global_common_utils.Connect | undefined;
+      i.e. addin-core now publicly advertises `connectedTable: Connect` for an
+      object that is a `ConnectedTable` entity and is later fed back into
+      buildExplores as one.
+    => CONFIRMED target 6. -> candidate C1.
+    Why it type-checks: packages/addin-core/tsconfig.json has `allowJs: true` and
+    no `checkJs`, and every caller (index.js, connects.js) is JavaScript, so no
+    error is reported anywhere.
+
+[6] TARGET 2 — SheetWithoutActive.
+    - Read /Users/colton/code/monorepo/packages/global-common-utils/src/types.ts:369-382:
+        export type Sheet = { name: string; id: string; isActive: boolean };
+        export type SheetWithoutActive = Omit<Sheet,'isActive'> & { isActive?: boolean };
+        export type SheetRangesPairsList = { sheet: SheetWithoutActive; ranges: string[] };
+      So the alias is literally `Sheet` with `isActive` optional.
+    - `grep -rn isActive` over packages/addin-core/src, packages/workbook-utils/src,
+      apps/gs-addin/src, apps/excel-addin/src, apps/addin-components/src,
+      packages/global-common-utils/src. The ONLY read inside addin-core is
+      /Users/colton/code/monorepo/packages/addin-core/src/data-access/index.ts:94
+        sheet = sheets.find(({ isActive }) => isActive);
+      which is inside `parseA1(a1, maybeSheets: Sheet[])` — a parameter that was
+      NOT widened. Read data-access/index.ts:1-215 in full to confirm.
+    - Read the three real `getRangesValues` implementations:
+      packages/workbook-utils/src/spreadsheetService.ts:140-175 (uses sheet.name / sheet.id)
+      apps/gs-addin/src/server/SpreadsheetService.js:64+       (uses sheet.id)
+      apps/excel-addin/src/services/SpreadsheetService.js:759+ (uses sheet.id)
+      None reads `isActive`.
+      => REFUTED the strong form of target 2: there is no `isActive` read reachable
+         from the widened parameters. No runtime bug.
+    - Residual concern kept as a low-severity candidate (C7): the widening was
+      applied to the SHARED `SheetRangesPairsList`, which is the parameter type of
+      `SpreadsheetService.getRangesValues` (types.ts:630) implemented by 4 apps,
+      and no production caller in this diff passes a sheet without `isActive`
+      (addin-core always has a full `Sheet`: getSheets(), getActiveSheet(),
+      parseA1, ConnectedTable.sheet, getSelectionRangeValues()). The only literal
+      that needed the looser type is the unit test's
+      `const ACTIVE_SHEET = { id: 'sheet1', name: 'Sheet1' }`
+      (findConnectedTablesInRange.test.ts:15) — and `findConnectedTablesInRange`
+      never even reads `activeSheet.id`, only `.name`.
+      Legitimate use: `Connect.sheet`, because ConnectedTable.serialize() persists
+      `getSheetDataToStringify = ({id, name}) => ({id, name})` (ConnectedTable.ts:247),
+      so stored connects really do lack `isActive`. That part is fine.
+
+[7] TARGET 4 — Table.dimensionGroups.
+    - Read /Users/colton/code/monorepo/packages/addin-core/src/entities/Entity.ts (37 lines):
+        set(options: never): void {
+          Object.keys(this).forEach((key) => { this[key] = options[key]; });
+          Object.assign(this, options);
+        }
+      and the constructor calls `this.set(options)`.
+      Read /Users/colton/code/monorepo/packages/addin-core/src/entities/Table.ts:87-108:
+        super({ value: options.name, text: options.prettyName, ...options });
+      => CONFIRMED the comment "Set by Object.assign in Entity#set from the server
+         table payload." is accurate.
+    - `CustomCalculatedItem` IS defined and exported:
+      /Users/colton/code/monorepo/packages/global-common-utils/src/types.ts:8-41.
+    - Compared global-common-utils `DimensionGroup` (types.ts:96-108) with the DB
+      schema /Users/colton/code/monorepo/apps/server/src/modelsDB/DimensionGroup.ts:14-65:
+        server                                     type
+        isHyperlink!: boolean          (required)   isHyperlink?: boolean      <- NEW, wrong optionality
+        customCalculatedItems!: CCI[][] (required)  customCalculatedItems?: CCI[][]  <- NEW, dim:2 matches comment, OK
+        calculatedItemFlags!: [...]    (required)   MISSING from the type
+        customValueFormats?: [...][]                MISSING from the type
+        sharedDimensionGroup?/Mapping?              MISSING (but present on the inline
+                                                    `Dimension.dimensionGroup` type at types.ts:78-91!)
+        fiscalYearStartsAtMonth?      (optional)    fiscalYearStartsAtMonth: number (required) <- pre-existing
+        table?                        (optional)    table: string (required)                   <- pre-existing
+      Also /Users/colton/code/monorepo/apps/server/src/modelsDB/customCalculatedItemSchema.ts:26
+        @prop({ required: false }) headerName?: string;
+      while types.ts:10 declares `headerName: string` (required). So the newly
+      added `customCalculatedItems?: CustomCalculatedItem[][]` promises a
+      non-optional `headerName` the DB may not have. -> low-severity candidate,
+      recorded here, not in the top 8.
+    - Consumer check: `getRowDimensionsNew` (utils.ts:1126+) only reads
+      `dimensionGroup.dimensions` (string[]), so no immediate break.
+    - Dead end: I looked for the API mapper for the table payload
+      (apps/server/src/mappers/tablesNew.ts:380-480) and only found
+      `formatTableAsMarkdown`, an MCP formatter, not the ServerTable serializer.
+      Did not pursue further; `ServerTable.dimensionGroups?: DimensionGroup[]`
+      (types.ts:172) already existed, so this is reuse, not a new contract.
+
+[8] TARGET 5 — DrillDownButton / DrilldownByOptionsModal dimensions prop.
+    - Read /Users/colton/code/monorepo/packages/frontend-common-components/src/components/ActionButtons/DrilldownByOptionsModal.tsx (110 lines).
+      The ONLY use of the prop, lines 35-43:
+        drillDownDimensions.map((elem) => ({
+          label: elem.prettyName, value: elem.name,
+          suggested: suggestedDimensions.includes(elem.name),
+        }))
+      => data-only. No `Dimension` method is ever called. Typing the prop as the
+         CLASS over-constrains it.
+    - Read /Users/colton/code/monorepo/packages/addin-core/src/entities/Dimension.ts (158 lines):
+      the class carries clone/deepClone/toQuery/toString/toValueString/getKey, so
+      structurally only real instances satisfy it.
+    - Producers:
+      /Users/colton/code/monorepo/packages/addin-core/src/operations/buildExplores/index.js:1607-1830
+      `getDrillDownByOptions` returns `getVisibleDimensions(table.dimensions)` in
+      3 of its branches; utils.ts:398-400
+        export function getVisibleDimensions(dimensions: Dimension[]) {
+          return dimensions.filter((dim) => !dim.hidden).map((dim) => dim.clone());
+        }
+      -> real `Dimension` instances at runtime, so the prop type is right for the
+      runtime value, BUT the producers are untyped JS/JSX and the PR had to add
+      TWO blanket suppressions to make the boundary compile:
+        apps/addin-components/src/components/ActionButtons/ActionButtonsWrapper.tsx:126
+          // @ts-expect-error TYPETODO: useDrilldown needs to be typed
+        apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx:1011
+          // @ts-expect-error TYPETODO: getDrillDownByOptions is not typed yet
+      (`apps/addin-components/src/hooks/useDrillDown.jsx:32-51` is .jsx;
+       `apps/web-ui/.../Workbook.tsx:803-814 handleGetDrillDownOptions` just forwards
+       whatever addin-core returns.)
+      Also note the internal contradiction the same PR creates: at index.js:1737 the
+      table comes from `tablesInRange[0]` which is now typed `Connect`, whose
+      `table: ServerTable` has `dimensions: Dimension[]` = the global-common-utils
+      DATA type (types.ts:43-84, only a `deepClone` field, no `clone`/`getKey`), so
+      per the declared types `getVisibleDimensions(table.dimensions)` cannot
+      type-check. Invisible only because index.js is JS.
+      => candidate C6.
+    - Checked the dependency direction: frontend-common-components/package.json
+      already lists `"@getaleph/addin-core": "workspace:*"`, and addin-core does
+      not depend on frontend-common-components. => no new cycle. REFUTED that sub-hypothesis.
+
+[9] Extra sweep of the new utils.ts for boundary lies not in the target list.
+    Read utils.ts:183-350 and 355-500 and 600-760.
+    - utils.ts:183-189 new local `type ExploreRecording` and utils.ts:205-209 /
+      312-316 declare `recording: ExploreRecording` as a REQUIRED, non-optional
+      parameter, while:
+        index.js:1800-1803  `await getTablesAndCleanCellReferences(
+                               parsedFormulas.map((e) => e.alephFormulaArgs), activeSheet);`  <-- 2 args
+        index.js:185-189    passes `recording` which is an optional param of the
+                            enclosing function
+        utils.ts:255        `if (recording) { ... }`  <-- body knows it is optional
+      => candidate C4.
+    - utils.ts:191-194 producer `TableAndCellReference = { table: string; cellReferences: CellValue[] }`
+      vs utils.ts:468-471 consumer `FilledTableAndCellReference = { table: Table; cellReferences: string[] }`,
+      and utils.ts:307 `return { table: tableName as string, cellReferences };`
+      (tableName is a `CellValue`, i.e. `string | number`). The glue in index.js
+      is `{ table: getTableByName(elem.table), cellReferences: elem.cellReferences }`
+      and `getTableByName` can return undefined (web-ui Workbook.tsx:625-638
+      `if (!t) { return; }`), yet `FilledTableAndCellReference.table` is a
+      non-optional `Table`. => candidate C5.
+    - utils.ts:446 `[filterGroup] = filterValues as [FilterGroup];` where
+      `filterValues: FilterGroup['body']` and (entities/FilterGroup.ts:8)
+      `type FilterGroupBody = (FilterGroup | Filter<FilterValue>)[]` — the cast
+      asserts element 0 is a group; if it is a `Filter` the function returns a
+      `Filter` typed as `FilterGroup` (no `.body`). Recorded (lower priority).
+    - utils.ts:711 `return narrowedMatches.filter(Boolean);` — `.filter(Boolean)`
+      does not narrow in TS, so the inferred return type is
+      `Connect[] | (Connect | undefined)[]`. Recorded (lower priority).
+    - New non-null assertions added on genuinely optional fields:
+      utils.ts:357 `table.getDimensionByValue(dimension)!` then :360
+      `filters.forEach(({ text }) => ...)` (crashes on undefined);
+      utils.ts:715 `e.sheet!.id`; :728-729 `explore.previousRowsCount!` /
+      `previousColumnsCount!` (both `?: number` at entities/Explore.ts:289-290,
+      NaN range if absent); :771/:795/:819 `dimension!.value` where
+      `ConnectParam.dimension?: Dimension` is optional (ConnectedTable.ts:46).
+      Recorded; the style angle will likely own these.
+    - Refuted: the `await getSheets()` change at utils.ts:263-270 is a genuine BUG
+      FIX — the old code was `getSheets().find(...)` on a Promise, which always
+      threw. That is why the integration fixture gained
+      `"Sheet4": { "A1": [["Sage Intacct (Native) | Profit and Loss"]] }`.
+
+[10] TARGET 3 follow-up — the test cast.
+     Read /Users/colton/code/monorepo/packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts:1-60.
+       19  const makeConnect = (overrides = {}): Connect =>
+       20   ({ id, name, sheet: { name: 'Sheet1' }, rows: { r1: { range } },
+       25     columns: { c1: { range } }, rowSettings: {}, columnSettings: {}, ...overrides })
+       29   as unknown as Connect;
+       31  const makeFilteredConnect = (overrides = {}) =>
+       32    makeConnect({ id: 'push', name: 'Push',
+       35      rowSettings: { specialConnectFilter: { range: 'E2:E10', isOn: true } }, ...overrides })
+       37    as unknown as Connect;
+     - `makeConnect` already returns `Connect`, so the second
+       `as unknown as Connect` at line 37 is a pure no-op double cast.
+     - The fixtures omit `_id`, `dataTable`, `sheetId`, `table`, `sheet.id` and
+       `rows.r1.dimension`/`id`, all REQUIRED by `Connect`; the double cast
+       disables every shape check. And because
+       `getConnectWithModifiedDimensionRanges` is `vi.fn()`-mocked (test line 12),
+       the suite can never notice that the real function needs `.deepClone()`.
+       => candidate C8.
+
+[11] TARGET: collateral damage from the new barrel export.
+     `export * from './connectUtils'` was added to
+     /Users/colton/code/monorepo/packages/global-common-utils/src/index.ts:43.
+     Grepped for pre-existing exports of the same names inside the package:
+       packages/global-common-utils/src/server/customDataConnectUpsert.ts:7
+         export type ConnectDimension = { dimension: string; range: string };
+     which is a COMPLETELY different shape with the same name. Checked
+     /Users/colton/code/monorepo/packages/global-common-utils/package.json:11-42 —
+     `.` maps to dist/main/index and `./server` maps to dist/server/index, and
+     src/index.ts does not re-export ./server/*.
+     => REFUTED: no TS2308 ambiguity, no collision through the main entry.
+     Worth one sentence in review: two unrelated `ConnectDimension` types now live
+     in one package.
+
+[12] Ran nothing destructive; no files were modified. I deliberately did NOT run
+     `pnpm types:check` with a temporary revert of `SheetWithoutActive` to prove
+     the widening is unnecessary, because other agents share this worktree.
+
+================================================================================
+5. CANDIDATES
+================================================================================
+
+--------------------------------------------------------------------------------
+C1  [HIGHEST]  packages/addin-core/src/operations/buildExplores/utils.ts:673
+    `findConnectedTablesInRange(connectedTables: Connect[], ...)` annotates the
+    parameter with the plain server `Connect` type, but every production caller
+    passes addin-core `ConnectedTable` entity instances, and the body relies on
+    entity-only behaviour.
+EVIDENCE
+    utils.ts:672-676
+      export async function findConnectedTablesInRange(
+        connectedTables: Connect[],
+        activeSheet: SheetWithoutActive,
+        range: Range,
+      ) {
+    utils.ts:697
+        const { error, connectedTableWithSettings } = await getConnectWithModifiedDimensionRanges(connect);
+    packages/addin-core/src/operations/connects.js:468-470
+      export const getConnectWithModifiedDimensionRanges = async (connectedTable) => {
+        let error = { hasError: false, message: '' };
+        const connectedTableClone = connectedTable.deepClone();      // class method
+    packages/addin-core/src/operations/connects.js:477-479
+        DisconnectRange.parse(connectedTable.rowSettings.specialConnectFilter.range)
+    packages/addin-core/src/operations/buildExplores/index.js:1600
+      * @param {() => ConnectedTable[]} params.getConnectedTables
+    apps/web-ui/src/pages/BudgetTablePOC/BudgetTablePOC.tsx:378
+      const pullConnectedTablesRef = useRef<ConnectedTable[]>([]);
+    Same file, same object, different type — utils.ts:743
+      export async function getProcessedConnectedTableForDrillDown(connectedTable: ConnectedTable, range: Range)
+    (index.js: 1421 -> 1439 -> 874 -> 877 is the path that carries the value from
+     findConnectedTablesInRange into getProcessedConnectedTableForDrillDown.)
+    Leaks into the built public types, packages/addin-core/dist/index.d.ts:4356
+      connectedTable: _getaleph_global_common_utils.Connect | undefined;
+FAILURE SCENARIO
+    Any consumer that trusts the new signature (e.g. a future TS port of
+    buildExplores, or an app calling the published addin-core types) passes a raw
+    server/`connectsJson` connect — which really does satisfy `Connect` — into
+    `findConnectedTablesInRange`. With two overlapping connects and an active
+    special connect filter, execution reaches
+    `getConnectWithModifiedDimensionRanges(connect)` and throws
+    `connect.deepClone is not a function`; the `catch {}` at utils.ts:703 swallows
+    it and the connect is treated as a match, so drilldown reports
+    "multiple tables" instead of drilling down. Conversely, code that trusts the
+    RETURN type reads `result[0].table.dimensions` as plain data although they are
+    `Dimension` instances, or (as index.js:1737 already does) calls
+    `getVisibleDimensions(table.dimensions)` -> `dim.clone()`, which
+    `ServerTable['dimensions']` does not have.
+
+--------------------------------------------------------------------------------
+C2  [HIGH]  packages/global-common-utils/src/connectUtils.ts:17
+    `ConnectRowSettings.specialConnectFilter` is declared `{ isOn?: boolean }`;
+    the real payload is `{ id?: string; range: string; isOn: boolean }`. `range`
+    (the cell range holding the TRUE/FALSE include flags) is the field the runtime
+    code actually needs, and `isOn` is not optional.
+EVIDENCE
+    connectUtils.ts:14-20
+      export type ConnectRowSettings = {
+        pull: { type: string };
+        push: { type: string };
+        specialConnectFilter?: { isOn?: boolean };
+      };
+    packages/addin-core/src/entities/ConnectedTable.ts:20
+      export type SpecialConnectFilter = { id?: string; range: string; isOn: boolean };
+    packages/ui-components/src/components/Connect/types.ts:85-89
+      specialConnectFilter?: { id?: string; isOn: boolean; range: string };
+    apps/web-ui/e2e/fixtures/connect.ts:570
+      rowSettings: { specialConnectFilter: { id: '1742399520377', isOn: true, range: 'B6:B7' } }
+    packages/addin-core/src/operations/connects.js:477-479 reads `.range`.
+FAILURE SCENARIO
+    A caller builds a value that satisfies the declared `Connect`
+    (`rowSettings: { pull, push, specialConnectFilter: { isOn: true } }` — no
+    `range`) and hands it to the connect pipeline. `hasActiveSpecialConnectFilter`
+    returns true, `getConnectWithModifiedDimensionRanges` runs
+    `DisconnectRange.parse(undefined)` and throws. Conversely, a TS consumer that
+    legitimately needs `connect.rowSettings.specialConnectFilter.range` gets
+    "Property 'range' does not exist" and is pushed into another cast — which is
+    exactly what the new unit test had to do.
+
+--------------------------------------------------------------------------------
+C3  [MEDIUM]  packages/global-common-utils/src/connectUtils.ts:9
+    `specialConnectFilter` was also copy-pasted onto `ConnectSettings` (the
+    connect-level `settings` object), where the field does not exist in any
+    producer or consumer.
+EVIDENCE
+    connectUtils.ts:5-12
+      export type ConnectSettings = {
+        direction: ConnectDirection;
+        pullEmptyAsZero: boolean;
+        pushEmptyAsZero: boolean;
+        specialConnectFilter?: { isOn?: boolean };   // <- not a real field
+      };
+    packages/ui-components/src/components/Connect/types.ts:14-18 — no such field.
+    packages/addin-core/src/entities/ConnectedTable.ts:14-18 — no such field.
+    utils.ts:668-670 only ever reads it off rowSettings / columnSettings:
+      const hasActiveSpecialConnectFilter = (connect: Connect) =>
+        Boolean(connect.rowSettings?.specialConnectFilter?.isOn) ||
+        Boolean(connect.columnSettings?.specialConnectFilter?.isOn);
+FAILURE SCENARIO
+    A developer writing new filter-aware code reads the type, writes
+    `if (connect.settings?.specialConnectFilter?.isOn)`, and it compiles cleanly.
+    The expression is always `undefined`, so the special connect filter is
+    silently ignored and the connect is treated as covering its full raw area —
+    the exact ACT-15585 overlap bug the surrounding code was written to fix.
+
+--------------------------------------------------------------------------------
+C4  [MEDIUM]  packages/addin-core/src/operations/buildExplores/utils.ts:208
+    `recording` is declared as a required, non-nullable `ExploreRecording` on
+    `getTablesAndCleanCellReferences` and `parseAndCleanAlephFormula`, but real
+    callers omit it and the body guards on it.
+EVIDENCE
+    utils.ts:205-209
+      export async function getTablesAndCleanCellReferences(
+        alephFormulas: AlephFormulaArgPiece[][],
+        activeSheet: Sheet,
+        recording: ExploreRecording,
+      ): Promise<TableAndCellReference[]> {
+    utils.ts:255  `if (recording) {`      <-- body knows it may be absent
+    utils.ts:312-316 same for parseAndCleanAlephFormula(activeSheet, formula, recording)
+    packages/addin-core/src/operations/buildExplores/index.js:1800-1803
+      const tableNamesAndCellReferences = await getTablesAndCleanCellReferences(
+        parsedFormulas.map((e) => e.alephFormulaArgs),
+        activeSheet,
+      );                                   <-- only 2 arguments
+FAILURE SCENARIO
+    The `if (recording)` guard now looks like dead code to anyone reading the
+    types, so a cleanup removes it (or a TS caller is forced to fabricate
+    `{ data: { input: { spreadsheet: {} } } }` to satisfy the signature). Either
+    way the non-recording drilldown path — the normal user path — dereferences
+    `recording.data.input.spreadsheet` and throws
+    "Cannot read properties of undefined (reading 'data')".
+
+--------------------------------------------------------------------------------
+C5  [MEDIUM]  packages/addin-core/src/operations/buildExplores/utils.ts:468
+    The producer type says cell references are `CellValue[]` (string | number) and
+    the table lookup can fail, but the consumer type in the same file declares
+    `{ table: Table; cellReferences: string[] }`, backed by an `as string` cast.
+EVIDENCE
+    utils.ts:191-194 (producer)
+      type TableAndCellReference = { table: string; cellReferences: CellValue[] };
+    utils.ts:307
+      return { table: tableName as string, cellReferences };   // tableName: CellValue
+    utils.ts:468-471 (consumer)
+      type FilledTableAndCellReference = { table: Table; cellReferences: string[] };
+    utils.ts:478-480 / 586-589 use it for
+      getFilterGroupAndVaryingDimensionsForScalarFormulas / dimensionsMatch,
+      which call `table.getDimensionByText(dimension, { ignoreCase: true })`
+      (entities/Table.ts:167-171 -> `text.toLowerCase()`).
+    Glue (index.js:191-194, 1805-1808):
+      const table = getTableByName(elem.table);   // can be undefined
+      return { table, cellReferences: elem.cellReferences };
+    apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx:625-629
+      const getTableForDrillDown = (name: string) => { const t = getTableByName(name);
+        if (!t) { return; } ... }              // returns undefined
+FAILURE SCENARIO
+    A cell referenced as a dimension name holds a number (e.g. a year `2024` in
+    `=ALEPH.GETDATA(A1, B1, C1)`), so `cellReferences` contains `2024`;
+    `getDimensionByText(2024, { ignoreCase: true })` throws
+    "text.toLowerCase is not a function". Or the formula names a table that no
+    longer exists: `getTableByName` returns `undefined`, `tablesMatch` reads
+    `t.table.id` and throws "Cannot read properties of undefined (reading 'id')" —
+    both cases the declared `string[]` / non-optional `Table` promise cannot happen.
+
+--------------------------------------------------------------------------------
+C6  [MEDIUM]  packages/frontend-common-components/src/components/ActionButtons/DrillDownButton.tsx:14
+    The `dimensions` prop was changed from data (`ServerTable['dimensions']`) to
+    the addin-core `Dimension` CLASS, even though the modal only reads two data
+    fields, and the change was absorbed with two blanket `@ts-expect-error`s at
+    the producer call sites instead of typing the producers.
+EVIDENCE
+    DrillDownButton.tsx:12-16
+      getDrillDownByOptions: () => Promise<{
+        dimensions: Dimension[];        // addin-core class, has clone/getKey/toQuery/...
+        suggestedDimensions: string[];
+        discoveryContext?: unknown;
+      }>;
+    DrilldownByOptionsModal.tsx:35-43 — the only consumption:
+      drillDownDimensions.map((elem) => ({ label: elem.prettyName, value: elem.name, ... }))
+    apps/addin-components/src/components/ActionButtons/ActionButtonsWrapper.tsx:125-126
+      // @ts-expect-error TYPETODO: useDrilldown needs to be typed
+      getDrillDownByOptions={getDrillDownByOptions}
+    apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx:1011-1012
+      // @ts-expect-error TYPETODO: getDrillDownByOptions is not typed yet
+      getDrillDownByOptions={handleGetDrillDownOptions}
+FAILURE SCENARIO
+    `@ts-expect-error` suppresses EVERY error on that JSX attribute, not just the
+    Dimension mismatch. If `handleGetDrillDownOptions` later stops returning
+    `suggestedDimensions`, or returns `dimensions: undefined`, or its signature
+    gains a required argument, the compiler stays silent and the modal crashes at
+    runtime in `drillDownDimensions.map` ("Cannot read properties of undefined").
+    Separately, any producer that legitimately has only server JSON dimensions
+    (e.g. a workbook path that never wraps them in `new Dimension(...)`) can no
+    longer satisfy the prop without a cast, although the modal needs nothing but
+    `name` and `prettyName`.
+
+--------------------------------------------------------------------------------
+C7  [LOW-MEDIUM]  packages/global-common-utils/src/types.ts:374
+    `SheetWithoutActive` is just `Sheet` with `isActive` made optional, and it was
+    pushed into the SHARED `SheetRangesPairsList` — the parameter type of
+    `SpreadsheetService.getRangesValues` implemented by four apps — although no
+    production caller in this diff passes a sheet without `isActive`; the only
+    value that needed the looser type is a unit-test literal.
+EVIDENCE
+    types.ts:369-382
+      export type Sheet = { name: string; id: string; isActive: boolean };
+      export type SheetWithoutActive = Omit<Sheet, 'isActive'> & { isActive?: boolean };
+      export type SheetRangesPairsList = { sheet: SheetWithoutActive; ranges: string[] };
+    types.ts:630-633 — that type is `SpreadsheetService.getRangesValues`' parameter.
+    packages/addin-core/src/data-access/index.ts:113, 191, 200, 304, 310, 446, 638
+      — 5 pair types + 2 functions widened.
+    packages/addin-core/src/data-access/index.ts:94 — the one place that DOES read
+      it is `parseA1`, whose `Sheet[]` parameter was (correctly) not widened:
+        sheet = sheets.find(({ isActive }) => isActive);
+    packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts:15
+      const ACTIVE_SHEET = { id: 'sheet1', name: 'Sheet1' };   // no isActive
+    (`findConnectedTablesInRange` never reads `activeSheet.id` either — only
+     `sheet.name !== activeSheet.name` at utils.ts:629.)
+FAILURE SCENARIO
+    Every spreadsheet-service implementation and every future consumer of
+    `SheetRangesPairsList` now receives a sheet whose `isActive` may be
+    `undefined`. The first implementation that needs the active sheet (e.g. a
+    batching optimisation that reads the active sheet's values without a round
+    trip, in the style of data-access:94) will silently treat
+    `isActive === undefined` as "not active" and read the wrong sheet, with no
+    compiler error. The narrower fix was to widen only `Connect['sheet']` (which
+    genuinely lacks `isActive`, per ConnectedTable.serialize at
+    entities/ConnectedTable.ts:247) and give the test fixture an `isActive`.
+
+--------------------------------------------------------------------------------
+C8  [LOW]  packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts:37
+    The fixtures are double-cast to `Connect`, which removes the only shape
+    validation in the test and means the suite can never catch the
+    Connect-vs-ConnectedTable mismatch of C1. The second cast is also a no-op.
+EVIDENCE
+    test:19-29
+      const makeConnect = (overrides = {}): Connect =>
+        ({ id: 'connect', name: 'Connect', sheet: { name: 'Sheet1' },
+           rows: { r1: { range: 'A2:A10' } }, columns: { c1: { range: 'B1:D1' } },
+           rowSettings: {}, columnSettings: {}, ...overrides }) as unknown as Connect;
+    test:31-37
+      const makeFilteredConnect = (overrides = {}) =>
+        makeConnect({ ... }) as unknown as Connect;     // makeConnect already returns Connect
+    Missing vs `Connect`: `_id`, `dataTable`, `sheetId`, `table`, `sheet.id`,
+    `rows.r1.dimension`, `rows.r1.id`, `columns.c1.dimension`, `columns.c1.id`.
+    test:10-13 mocks `getConnectWithModifiedDimensionRanges`, the one function
+    that would have revealed that the real value must be a class instance.
+FAILURE SCENARIO
+    `Connect` gains or renames a required field (or the function is later
+    correctly retyped to `ConnectedTable[]`) and the test still compiles and
+    passes, because `as unknown as Connect` accepts anything. The narrowing logic
+    keeps "passing" against fixtures that no runtime code path can produce, so a
+    regression in the ACT-15585 overlap narrowing ships unnoticed.
+
+--------------------------------------------------------------------------------
+ALSO RECORDED (below the top 8)
+--------------------------------------------------------------------------------
+A. packages/global-common-utils/src/types.ts:102-104 — new
+   `isHyperlink?: boolean` is REQUIRED in the DB schema
+   (apps/server/src/modelsDB/DimensionGroup.ts:52-53 `isHyperlink!: boolean`),
+   and `customCalculatedItems?: CustomCalculatedItem[][]` promises
+   `headerName: string` (types.ts:10) while
+   apps/server/src/modelsDB/customCalculatedItemSchema.ts:26 has
+   `headerName?: string`. `calculatedItemFlags`, `customValueFormats`,
+   `sharedDimensionGroup`, `sharedDimensionGroupMapping` are still missing from
+   `DimensionGroup` yet present on the near-duplicate inline
+   `Dimension.dimensionGroup` type at types.ts:78-91.
+B. packages/addin-core/src/operations/buildExplores/utils.ts:446 —
+   `[filterGroup] = filterValues as [FilterGroup];` asserts that the first element
+   of a `(FilterGroup | Filter)[]` is a group; if it is a `Filter`, the function
+   returns a `Filter` typed as `FilterGroup` and downstream `.body` access breaks.
+C. packages/addin-core/src/operations/buildExplores/utils.ts:711 —
+   `narrowedMatches.filter(Boolean)` does not narrow, so the declared return type
+   is `(Connect | undefined)[]`.
+D. New `!` assertions on genuinely optional fields: utils.ts:357 (dimension lookup
+   may miss, then :360 destructures `{ text }`), :715 `e.sheet!`, :728-729
+   `previousRowsCount!`/`previousColumnsCount!` (Explore.ts:289-290 both optional
+   -> NaN range), :771/:795/:819 `dimension!.value` (ConnectedTable.ts:46
+   `dimension?: Dimension`).
+E. Naming hazard: two unrelated `ConnectDimension` types now live in
+   global-common-utils — src/connectUtils.ts:22 (20-field dimension) and
+   src/server/customDataConnectUpsert.ts:7 (`{ dimension; range }`). No TS2308
+   because ./server is a separate entry point, but it is a trap.
+F. Target 1 sub-results, all REFUTED: nothing dropped from
+   packages/workbook-utils/src/connect.ts; `ServerTable` there was already a
+   re-export of the global-common-utils type (useWorkbookTables.ts:1-10), so
+   `Connect.table` is unchanged; `export * from './connect'` still in index.tsx;
+   consumers (frontend-common-components InThisFile) are unaffected.
+G. Target 2 strong form REFUTED: no `isActive` read is reachable from any widened
+   parameter (checked all three `getRangesValues` implementations plus
+   data-access/index.ts in full).
+H. utils.ts:263-270 `await getSheets()` is a real bug FIX (the old
+   `getSheets().find(...)` ran `.find` on a Promise); it explains the new
+   `Sheet4/A1` entry in the integration fixture.

@@ -1,0 +1,699 @@
+================================================================================
+1. PROMPT RECEIVED (verbatim)
+================================================================================
+You are finder angle "CONVENTIONS (CLAUDE.md)" — one of 10 parallel finder agents in a maximum-effort code review.
+
+REVIEW SCOPE: the diff of git branch `colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs` vs `trunk`, in repo /Users/colton/code/monorepo.
+- Full unified diff is saved at: /Users/colton/code/monorepo/code-review-notes/00-review.diff  (READ THIS FIRST, in full)
+- Regenerate with: `git diff trunk...HEAD` run from /Users/colton/code/monorepo
+
+YOUR ANGLE: find the CLAUDE.md files that govern the changed code, then check the diff for CLEAR violations of the rules they state.
+
+Step 1 — locate every governing instruction file. A directory's CLAUDE.md only applies to files at or below it. Changed files live under:
+  apps/addin-components/, apps/gs-addin/, apps/server/, apps/web-ui/, packages/addin-core/, packages/frontend-common-components/, packages/global-common-utils/, packages/workbook-utils/
+So check for existence and read, at minimum:
+  ~/.claude/CLAUDE.md (user level)
+  /Users/colton/code/monorepo/CLAUDE.md (repo root)
+  /Users/colton/code/monorepo/AGENTS.md (read it; note whether it is a symlink/duplicate of CLAUDE.md)
+  and run: `find /Users/colton/code/monorepo/apps /Users/colton/code/monorepo/packages -maxdepth 3 -name 'CLAUDE.md' -o -maxdepth 3 -name 'CLAUDE.local.md' | grep -v node_modules`
+Also check /Users/colton/code/monorepo/.claude/ for instruction files and any .cursor/rules that restate conventions.
+
+Step 2 — check the diff against those rules. Only flag a violation when you can quote the EXACT rule text and the EXACT line that breaks it. No style preferences, no vague "spirit of the doc" inferences. In each finding, name the CLAUDE.md path and quote the rule.
+
+Rules I already know exist in the repo-root CLAUDE.md (verify the exact wording yourself before quoting):
+- "**Fix the root type instead of casting.** `as any` / `as unknown as X` is rarely the answer and should be avoided when possible"
+- "Narrow with type guards, not `@ts-expect-error`, casts, or non-null assertions. A `!` usually means restructure so the type flows"
+- "Reuse exported types instead of re-deriving them ... export the type from its home module if needed. Import library-declared types rather than redeclaring them."
+- "Remove casts and guards that a refactor made unnecessary."
+- "Before writing a helper, hook, type, or component, search for an existing one"
+- "If the same logic appears twice in your diff, extract a helper."
+- "Never patch the same value in more than one place."
+- "`Promise.all` independent awaits — sequential awaits are only for real data dependencies."
+- "Prefer plain, slightly longer code over dense one-liners"
+- "Add a brief 'why' comment on non-obvious transforms."
+
+Candidate violations to verify with exact line numbers (confirm or refute each):
+a) `as unknown as Connect` twice in packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts (lines ~29 and ~37).
+b) `@ts-expect-error TYPETODO` added at apps/addin-components/src/components/ActionButtons/ActionButtonsWrapper.tsx:~125 and apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx:~1011.
+c) The `@ts-expect-error Table is yet not fully typed...` that SURVIVED the migration in `getRowDimensionsNew` in packages/addin-core/src/operations/buildExplores/utils.ts (~line 930) — note the diff REMOVED four sibling `@ts-expect-error`s by adding `dimensionGroups` to Table, so this one is arguably "a guard a refactor made unnecessary" or an unfixed root cause.
+d) Every `!` non-null assertion ADDED by the diff in packages/addin-core/src/operations/buildExplores/utils.ts — enumerate them all with line numbers (`getDimensionByValue(dimension)!`, `dimension!.value` ×3, `e.sheet!`, `previousRowsCount!`, `previousColumnsCount!`, `getDimensionByValue(dimension, { ignoreCase: true })!`) and `filterValues as [FilterGroup]`, `tableName as string`.
+e) The same missing narrowing patched in three places: `throw new Error('Expected aleph formula to have args')` in `hasArrayParameters` AND in `getSingleAlephFormula` in utils.ts, plus `|| !parsed.alephFormula` added in apps/server/src/operations/alephFunction.ts (~line 102) — vs the rule "Never patch the same value in more than one place."
+f) `ConnectDimension` / `ConnectSettings` / `ConnectRowSettings` newly declared in packages/global-common-utils/src/connectUtils.ts when equivalent shapes already exist elsewhere (grep packages/addin-core/src/entities/ConnectedTable.ts and packages/ui-components for `SpecialConnectFilter`, `ConnectSettings`) — vs "Import library-declared types rather than redeclaring them" / "Before writing a helper, hook, type, or component, search for an existing one".
+g) Duplicate import statements from the same module in utils.ts (`@getaleph/global-common-utils` twice at lines ~4-5, `../../transformers` twice at ~30-36, `../connects` twice at ~38-39) — check whether the repo's oxlint/eslint config enables `import/no-duplicates`; if it is a configured rule, this is a lint violation, and CLAUDE.md says lint must pass via `pnpm run lint`.
+h) `for (const args of alephFormulas) { … await … }` with `// oxlint-disable-next-line no-await-in-loop` in utils.ts (~line 262) — vs "`Promise.all` independent awaits". Read the accompanying comment ("No need to Promise.all since the only async call is cached") and judge whether it justifies the exception.
+i) Any place the diff DID leave a stale comment or a JSDoc that no longer matches the code (e.g. `// eslint-disable-next-line prefer-const -- alephFormulaArgs is modified` in `getSingleAlephFormula` where the variable may no longer be reassigned).
+j) Check whether the repo has any explicit convention about `TYPETODO` markers (grep `TYPETODO` across the repo and in CLAUDE.md / AGENTS.md / .cursor) — e.g. must they reference a ticket?
+k) Verify lint and typecheck actually pass, since CLAUDE.md mandates the pnpm scripts. Time-box to ~6 minutes total. Use pnpm ONLY, never npx. Per CLAUDE.md you may need to build @getaleph/global-common-utils first: `cd /Users/colton/code/monorepo && pnpm turbo run build --filter=@getaleph/global-common-utils --env-mode=loose`. Then `pnpm -F @getaleph/addin-core run lint` and `pnpm -F @getaleph/addin-core run types:check`. Report the exact warnings/errors emitted for files in the diff. If the environment blocks this, say so and move on.
+
+MANDATORY NOTE-TAKING (explicit user request): You MUST write a detailed plain-text notes file at
+/Users/colton/code/monorepo/code-review-notes/10-conventions.txt
+using the Write tool, BEFORE returning your final answer. It MUST contain, in this order:
+1. "PROMPT RECEIVED" — the verbatim full text of this prompt.
+2. "WHAT I AM LOOKING FOR"
+3. "GOALS"
+4. "METHOD / HOW I ACCOMPLISHED IT" — chronological log: every command run (with output), every file read (absolute path + line ranges), what you concluded. Include dead ends and refuted hypotheses. List every CLAUDE.md file you found and whether it governs the changed files.
+5. "CANDIDATES" — file, line, summary, the quoted rule + its CLAUDE.md path, and the quoted offending line.
+
+OUTPUT: return a JSON array of up to 8 candidate findings, each {"file","line","summary","failure_scenario"}. `failure_scenario` must name the CLAUDE.md path and quote the exact rule broken, plus the exact offending line. RECALL mode — err on the side of surfacing, but do NOT invent rules. If no CLAUDE.md applies or there are no clear violations, return [].
+
+
+================================================================================
+2. WHAT I AM LOOKING FOR
+================================================================================
+Clear, quotable violations of the repository's own written agent instructions
+(CLAUDE.md / AGENTS.md / .cursor/rules / .oxlintrc.json-as-enforced-by-lint-script)
+committed by the diff of branch
+`colton/typ-797-convert-packagesaddin-coresrcoperationsbuildexploresutilsjs`
+against `trunk`.
+
+Specifically:
+  - TypeScript escape hatches introduced instead of fixing root types:
+    `!`, `as X`, `as unknown as X`, `@ts-expect-error`.
+  - Guards/casts/eslint-disable comments the refactor made unnecessary but
+    which survived.
+  - Logic duplicated inside the diff instead of extracted into a helper.
+  - Types redeclared instead of imported.
+  - Sequential awaits over independent work.
+  - Non-obvious transforms with no "why" comment.
+  - Lint rules that are configured in the repo config and that the diff now
+    trips (CLAUDE.md mandates `pnpm run lint`).
+
+I am NOT looking for: correctness bugs, performance, test coverage, naming
+taste, or anything I cannot back with an exact quoted rule from a governing
+instruction file.
+
+================================================================================
+3. GOALS
+================================================================================
+G1. Enumerate every instruction file that governs any changed file, and note
+    which ones actually apply (directory scoping).
+G2. Confirm or refute each of the 11 candidates (a)-(k) handed to me, with
+    real, current line numbers read from the working tree (not diff hunk
+    offsets).
+G3. Actually run `pnpm run lint` and `pnpm run types:check` for the primary
+    changed package (`@getaleph/addin-core`) and report the exact diagnostics
+    emitted for files in the diff.
+G4. Produce <=8 JSON findings, each with the CLAUDE.md path, the verbatim rule
+    text, and the verbatim offending source line.
+
+================================================================================
+4. METHOD / HOW I ACCOMPLISHED IT  (chronological)
+================================================================================
+
+--- STEP 1: read the diff -------------------------------------------------------
+
+READ /Users/colton/code/monorepo/code-review-notes/00-review.diff lines 1-1250
+     (first page; file is 1536 lines total)
+READ /Users/colton/code/monorepo/code-review-notes/00-review.diff lines 1250-1536
+     (second page — needed because page 1 truncated at the 25k-token cap)
+
+Diff covers 20 files. Core of the change: rename
+  packages/addin-core/src/operations/buildExplores/utils.js -> utils.ts
+plus deletion of newUtils.ts (its 4 exports folded into utils.ts), plus a
+`Connect` type moved from packages/workbook-utils/src/connect.ts into a new
+packages/global-common-utils/src/connectUtils.ts, plus a `SheetWithoutActive`
+type added to packages/global-common-utils/src/types.ts.
+
+
+--- STEP 2: locate governing instruction files ---------------------------------
+
+RAN: ls -la CLAUDE.md AGENTS.md ; ls -la ~/.claude/CLAUDE.md ;
+     find apps packages -maxdepth 3 \( -name 'CLAUDE.md' -o -name
+     'CLAUDE.local.md' -o -name 'AGENTS.md' \) | grep -v node_modules ;
+     ls -la .claude/ ; find .cursor -type f
+OUTPUT:
+  -rw-r--r-- AGENTS.md   (6198 bytes)
+  lrwxr-xr-x CLAUDE.md -> AGENTS.md          <-- ROOT CLAUDE.md IS A SYMLINK
+  ls: cannot access '/Users/colton/.claude/CLAUDE.md': No such file or directory
+  /Users/colton/code/monorepo/apps/web-ui/CLAUDE.md
+  /Users/colton/code/monorepo/apps/server/AGENTS.md
+  /Users/colton/code/monorepo/apps/server/CLAUDE.md
+  /Users/colton/code/monorepo/apps/excel-addin/CLAUDE.md
+  /Users/colton/code/monorepo/packages/ui-components/AGENTS.md
+  .claude/ -> hooks/, settings.json, settings.local.json, skills/, worktrees/
+  .cursor/rules/: server-models.mdc, server-openapi-architecture.mdc,
+                  run-tests-after-unit-test-changes.mdc, server-migrations.mdc
+  .cursor/commands/deslop.md
+
+RAN: ls -la apps/server/CLAUDE.md packages/ui-components/AGENTS.md
+OUTPUT: apps/server/CLAUDE.md -> AGENTS.md   (also a symlink; same content)
+
+INSTRUCTION-FILE INVENTORY / SCOPING VERDICT:
+  * /Users/colton/code/monorepo/CLAUDE.md (symlink -> AGENTS.md)
+    GOVERNS: everything in the diff. THIS IS THE PRIMARY SOURCE FOR MY FINDINGS.
+  * ~/.claude/CLAUDE.md
+    DOES NOT EXIST. No user-level rules.
+  * /Users/colton/code/monorepo/apps/server/CLAUDE.md (symlink -> AGENTS.md)
+    GOVERNS: apps/server/src/operations/alephFunction.ts (only server file in
+    the diff). Relevant rules found: "**Avoid `as` type casts** — prefer type
+    annotations, `satisfies`, or widening function signatures instead. Casts
+    hide type errors." and "**Prefer arrow functions**". The alephFunction.ts
+    diff adds no casts and keeps arrow style -> NO server-specific violation.
+  * /Users/colton/code/monorepo/apps/web-ui/CLAUDE.md
+    GOVERNS: apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx.
+    Content is entirely about "API calls: use the server SDK" / generated
+    response types. The Workbook.tsx change is a one-line @ts-expect-error on a
+    component prop, unrelated to API calls -> NO web-ui-specific violation.
+    (READ: /Users/colton/code/monorepo/apps/web-ui/CLAUDE.md lines 1-19, full.)
+  * /Users/colton/code/monorepo/apps/excel-addin/CLAUDE.md
+    DOES NOT GOVERN — no changed file lives under apps/excel-addin/.
+  * /Users/colton/code/monorepo/packages/ui-components/AGENTS.md
+    DOES NOT GOVERN — no changed file lives under packages/ui-components/.
+    (Diff touches packages/frontend-common-components/, a different package.)
+  * .cursor/rules/*.mdc — all four are server-specific (models, openapi,
+    migrations, run-tests-after-unit-test-changes). None restates a rule the
+    diff breaks. The `run-tests-after-unit-test-changes` rule is about running
+    tests, which is a process concern, not a diff artifact.
+  * NO CLAUDE.md exists for packages/addin-core/, packages/global-common-utils/,
+    packages/workbook-utils/, packages/frontend-common-components/,
+    apps/addin-components/, or apps/gs-addin/. Those files are governed ONLY by
+    the repo-root CLAUDE.md.
+
+READ /Users/colton/code/monorepo/AGENTS.md (lines 1-83, full). Verified the
+exact rule wording. The rules I will quote, with their real line numbers in
+AGENTS.md (== CLAUDE.md):
+  L12: "Use **pnpm** exclusively — never `npx`. Use the scripts defined in each
+        app's `package.json`:"
+  L14: "- `pnpm run lint`, `pnpm run test`, `pnpm run types:check`, `pnpm run
+        build` — run from the app directory"
+  L38: "Before writing a helper, hook, type, or component, search for an
+        existing one — it usually exists ..."
+  L39: "If the same logic appears twice in your diff, extract a helper."
+  L43: "Prefer plain, slightly longer code over dense one-liners and clever
+        tricks. An explicit prop or flag beats indirect control. Add a brief
+        \"why\" comment on non-obvious transforms."
+  L48: "- **Fix the root type instead of casting.** `as any` / `as unknown as X`
+        is rarely the answer and should be avoided when possible — find where
+        the value lost its type (untyped upstream field, missing generic, stale
+        schema) and fix it there."
+  L49: "- Narrow with type guards, not `@ts-expect-error`, casts, or non-null
+        assertions. A `!` usually means restructure so the type flows (e.g.
+        iterate map entries instead of keys + `.get(key)!`)."
+  L50: "- Reuse exported types instead of re-deriving them
+        (`Awaited<ReturnType<typeof fn>>[number]`) — export the type from its
+        home module if needed. Import library-declared types rather than
+        redeclaring them."
+  L51: "- Remove casts and guards that a refactor made unnecessary."
+  L55: "- If you're re-sorting, re-mapping, or overriding data downstream to
+        make it \"come out right\", find where it goes wrong and fix it there.
+        Never patch the same value in more than one place."
+  L59: "- `Promise.all` independent awaits — sequential awaits are only for real
+        data dependencies."
+All rule quotes above are VERBATIM from the file.
+
+
+--- STEP 3: run lint + typecheck (goal G3) ------------------------------------
+
+RAN (background):
+  pnpm turbo run build --filter=@getaleph/global-common-utils --env-mode=loose
+  pnpm -F @getaleph/addin-core run lint
+  pnpm -F @getaleph/addin-core run types:check
+OUTPUT (from
+  /private/tmp/.../scratchpad/lint.log):
+  build: "Tasks: 2 successful, 2 total / Cached: 2 cached / FULL TURBO"
+  types:check: "$ tsc --noEmit"  -> NO ERRORS. TYPECHECK PASSES.
+  lint: exit code 0. LINT PASSES.
+
+  BUT: the `tail -80` I applied truncated the src/ warnings, so I re-ran
+  filtered.
+
+RAN: cd packages/addin-core && pnpm run lint 2>&1 | grep "buildExplores/utils"
+OUTPUT (verbatim, confirms these ARE emitted by the real `pnpm run lint`):
+  src/operations/buildExplores/utils.ts:4:46: warning import(no-duplicates): Modules should not be imported multiple times in the same file help: Merge these imports into a single import statement
+  src/operations/buildExplores/utils.ts:35:8: warning import(no-duplicates): Modules should not be imported multiple times in the same file help: Merge these imports into a single import statement
+  src/operations/buildExplores/utils.ts:38:37: warning import(no-duplicates): Module '../connects' is imported more than once in this file help: Merge these imports into a single import statement
+  src/operations/buildExplores/utils.ts:274:26: warning oxc(no-accumulating-spread): Do not spread accumulators in Array.prototype.reduce()
+  src/operations/buildExplores/utils.ts:282:9: warning oxc(no-accumulating-spread): Do not spread accumulators in Array.prototype.reduce()
+  src/operations/buildExplores/utils.ts:375:16: warning unicorn(prefer-array-some): Prefer `.some(…)` over `.find(…)` or `.findLast(…)`.
+  src/operations/buildExplores/utils.ts:759:11: warning eslint(no-console): Unexpected console statement.
+  src/operations/buildExplores/utils.ts:847:7: warning eslint(no-console): Unexpected console statement.
+  src/operations/buildExplores/utils.ts:931:16: warning unicorn(prefer-array-some): Prefer `.some(…)` over `.find(…)` or `.findLast(…)`.
+
+RAN: pnpm run lint 2>&1 | grep -c "warning"
+OUTPUT: 508
+
+RAN: grep -n -A20 '"scripts"' packages/addin-core/package.json
+OUTPUT (line 26):
+  "lint": "oxlint --config ../../.oxlintrc.json ./src ./tests --max-warnings=520",
+  "types:check": "tsc --noEmit",
+=> 508 warnings against a --max-warnings=520 budget. Lint PASSES, with 12
+   warnings of headroom. The 3 new no-duplicates warnings the diff introduced
+   consume 25% of the remaining headroom.
+
+RAN: grep -rn "no-duplicates" --include="*.json" ... | grep -v node_modules
+OUTPUT: .oxlintrc.json:132:    "no-duplicates": "warn",
+RAN: sed -n '110,150p' .oxlintrc.json
+OUTPUT confirms it sits under a `// --- Import rules ---` block alongside
+"first", "no-cycle", "no-self-import". So `import/no-duplicates` IS a
+deliberately configured repo rule, not an accident.
+
+CONCLUSION for (g) and (k): CONFIRMED as a real, configured lint-rule
+violation introduced by the diff. But note honestly: lint EXITS 0, so this is
+"new warnings against a configured rule", not "lint is broken". Typecheck is
+clean.
+
+
+--- STEP 4: verify each candidate with real working-tree line numbers ---------
+
+RAN: grep -n '!\.\|)!\|!\.value\| as \|@ts-expect-error\|oxlint-disable\|eslint-disable'
+     packages/addin-core/src/operations/buildExplores/utils.ts
+RAN: sed -n '1,45p' packages/addin-core/src/operations/buildExplores/utils.ts
+READ packages/addin-core/src/operations/buildExplores/utils.ts lines 126-181
+READ packages/addin-core/src/operations/buildExplores/utils.ts lines 348-392
+READ packages/addin-core/src/operations/buildExplores/utils.ts lines 898-939
+RAN: sed -n '250,312p' / '644,660p' / '712,750p' on the same file
+
+(a) CONFIRMED.
+    RAN: grep -n "as unknown as Connect"
+         packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts
+    OUTPUT: 29:  }) as unknown as Connect;
+            37:  }) as unknown as Connect;
+    Two `as unknown as Connect` in the new test helpers, added by this diff.
+
+(b) CONFIRMED.
+    RAN: grep -n "@ts-expect-error" on both files.
+    OUTPUT:
+      apps/addin-components/src/components/ActionButtons/ActionButtonsWrapper.tsx:125:        // @ts-expect-error TYPETODO: useDrilldown needs to be typed
+      apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx:1011:                  // @ts-expect-error TYPETODO: getDrillDownByOptions is not typed yet
+    (Workbook.tsx:166 has a pre-existing unrelated @ts-expect-error — not from
+    this diff, ignored.)
+    NOTE the root cause is identified in the diff itself: the diff CHANGED
+    packages/frontend-common-components/src/components/ActionButtons/DrillDownButton.tsx
+    to type `dimensions: Dimension[]` (from @getaleph/addin-core). The two
+    call-site suppressions exist because the producers
+    (apps/addin-components/src/hooks/useDrillDown.jsx — still .jsx, only touched
+    for a catch-param rename in this diff, and web-ui's handleGetDrillDownOptions)
+    were not typed. So the root cause was located and NOT fixed.
+
+(c) CONFIRMED, and it is the strongest finding of its class.
+    utils.ts:930 still reads:
+      "      // @ts-expect-error Table is yet not fully typed..."
+    for line 931:
+      "      !filters.find((dimension) => dimension.value === value) && !parentDimensionTexts.has(text),"
+    The diff removed FOUR sibling `@ts-expect-error Table is yet not fully
+    typed...` comments from this exact function (visible in the deleted
+    newUtils.ts hunk, diff lines 358, 360, 365, 372) by adding
+    `dimensionGroups?: DimensionGroup[]` to
+    packages/addin-core/src/entities/Table.ts. This 5th one is NOT about Table
+    typing at all — `filters` is `(Dimension | undefined)[]` because
+    `table.getDimensionByAnyMatch()` returns `Dimension | undefined` (line 909
+    has no `!`). So the suppression comment is now factually wrong AND the fix
+    is a one-character narrowing (`dimension?.value`). This is both "a guard a
+    refactor made unnecessary/misdescribed" and "@ts-expect-error instead of a
+    type guard".
+
+(d) CONFIRMED — full enumeration of `!` and casts ADDED by the diff in
+    packages/addin-core/src/operations/buildExplores/utils.ts (current line
+    numbers, read from the working tree):
+      307: `      return { table: tableName as string, cellReferences };`
+      357: `  const filters = Object.keys(dimensionFilterMap).map((dimension) => table.getDimensionByValue(dimension)!);`
+      446: `      [filterGroup] = filterValues as [FilterGroup];`
+      497: `          table.getDimensionByValue(dimension, { ignoreCase: true })!;`
+      715: `  const explore = explores.find((e) => e.sheet!.id === activeSheet.id);`
+      728: `      row: start + explore.previousRowsCount!,`
+      729: `      column: explore.originColumnIndex + explore.previousColumnsCount!,`
+      771: `          dimension: normalizeName(dimension!.value),`
+      795: `          dimension: normalizeName(dimension!.value),`
+      819: `          dimension: normalizeName(dimension!.value),`
+    => 8 non-null assertions + 2 `as` casts, all net-new (the .js original had
+    no type syntax at all). Note 771/795/819 are the SAME `dimension!.value`
+    written three times in three sibling closures of one function
+    (getProcessedConnectedTableForDrillDown), so they also hit L39/L55.
+    ALSO FOUND (not in my brief, adding it):
+      649: `      row: (lastRowSubrange.cellStart.row ?? NaN) - 1,`
+      650: `      column: (lastRowSubrange.cellStart.column ?? NaN) + 1,`
+    `?? NaN` is a non-obvious transform with zero explanatory comment ->
+    AGENTS.md L43 "Add a brief \"why\" comment on non-obvious transforms."
+
+(e) CONFIRMED (3 sites).
+    utils.ts:129-137 (`hasArrayParameters`):
+      133  const { alephFormulaArgs } = splitAlephFormula(alephFormula);
+      134  if (!alephFormulaArgs) {
+      135    throw new Error('Expected aleph formula to have args');
+      136  }
+    utils.ts:170-172 (`getSingleAlephFormula`):
+      170  if (!alephFormulaArgs) {
+      171    throw new Error('Expected aleph formula to have args');
+      172  }
+    Byte-identical throw, identical guard, same file, both added by the diff.
+    THIRD site: apps/server/src/operations/alephFunction.ts:102
+      `  if (!parsed || !parsed.alephFormula) {`
+    The real root cause is the new discriminated union the diff introduced in
+    utils.ts:118-127 (`ParsedAlephFormulaWithoutArgs | ParsedAlephFormulaWithArgs`)
+    which is keyed on the OPTIONALITY of `alephFormula`/`alephFormulaArgs`
+    rather than on a discriminant TS can narrow from `nFormulas`. Because the
+    union never narrows, every consumer re-checks it by hand. Fix belongs in
+    splitAlephFormula's return type (e.g. discriminate on a literal, or split
+    into two functions), not in three consumers.
+
+(f) PARTIALLY REFUTED — I am NOT reporting this as a top finding.
+    RAN: grep -rn "ConnectSettings\s*=\|ConnectRowSettings\s*=\|ConnectDimension\s*=\|specialConnectFilter"
+         --include="*.ts" --include="*.tsx" packages apps | grep -v node_modules
+    OUTPUT (src, not dist):
+      packages/ui-components/src/components/Connect/types.ts:1:export type ConnectDimension = {
+      packages/ui-components/src/components/Connect/types.ts:14:export type ConnectSettings = {
+      packages/workbook-utils/src/utils.ts:30:type ConnectDimension = {
+      packages/workbook-utils/src/utils.ts:59:export type WorkbookConnectSettings = {
+      packages/addin-core/src/entities/ConnectedTable.ts:14:type ConnectSettings = {
+      packages/addin-core/src/entities/ConnectedTable.ts:20:export type SpecialConnectFilter = { id?: string; range: string; isOn: boolean };
+      packages/addin-core/src/entities/ConnectedTable.ts:22:export type ConnectRowSettings = {
+    RAN: sed -n '1,40p' packages/ui-components/src/components/Connect/types.ts
+    ANALYSIS: yes, four near-duplicate families of Connect* types exist. BUT the
+    diff's connectUtils.ts is a MOVE of the pre-existing
+    packages/workbook-utils/src/connect.ts body (workbook-utils now re-exports
+    it), so the diff did not author these shapes. And global-common-utils is the
+    dependency FLOOR — it cannot import `SpecialConnectFilter` from addin-core
+    or ui-components without a dependency cycle. So "Import library-declared
+    types rather than redeclaring them" cannot be cleanly charged here.
+    WHAT IS NEW, and is chargeable: the diff hand-added the SAME inline literal
+      `  specialConnectFilter?: {\n    isOn?: boolean;\n  };`
+    to BOTH `ConnectSettings` (connectUtils.ts:9-11) and `ConnectRowSettings`
+    (connectUtils.ts:17-19) instead of naming it once, while
+    packages/addin-core/src/entities/ConnectedTable.ts:20 already names exactly
+    that concept `SpecialConnectFilter`. That's a genuine but low-severity
+    duplication. Ranked last; may be dropped if I need the slot.
+
+(g) CONFIRMED. See STEP 3. Working-tree lines
+    (from `sed -n '1,45p'`):
+      3  import { AlephError, DrillDownError } from '@getaleph/frontend-common-utils';
+      4  import { appendAndFilterToFilterGroup } from '@getaleph/global-common-utils';
+      5  import { CellValue, Connect, Sheet, SheetWithoutActive } from '@getaleph/global-common-utils';
+      ...
+     30  import {
+     31    AddinCoreExploreFilter,
+     32    AddinCoreExploreFilterGroup,
+     33    addinCoreFilterToFilterGroup,
+     34    simpleExploreFilterToAddinCoreFilter,
+     35  } from '../../transformers';
+     36  import { SpreadsheetInput } from '../../transformers';
+     37  import { normalizeName, arrayToKey } from '../../utils';
+     38  import { parseConnectMeasure } from '../connects';
+     39  import { getConnectWithModifiedDimensionRanges } from '../connects';
+    Three duplicate-module import pairs: 4+5, 35+36, 38+39.
+
+(h) CONFIRMED but ARGUABLE — reporting at low rank with the counter-argument
+    stated.
+    utils.ts:254-266:
+      254  for (const args of alephFormulas) {
+      255    for (const arg of args) {
+      256      if (arg.isRef) {
+      257        // No need to Promise.all since the only async call is cached
+      258        // oxlint-disable-next-line no-await-in-loop
+      259        const { cell, sheet } = await splitCellAndSheet(arg, activeSheet);
+    JUDGEMENT: the awaits ARE provably independent — `splitCellAndSheet(arg,
+    activeSheet)` reads only `arg` and the module-level `activeSheet`; nothing
+    from iteration N feeds iteration N+1. The author's comment is a
+    performance rationalisation ("the call is cached"), not a data dependency,
+    and AGENTS.md L59 says the ONLY licence for sequential awaits is "real data
+    dependencies". Aggravating: the SAME traversal over the SAME
+    `splitCellAndSheet(arg, activeSheet)` is done again 40 lines later at
+    utils.ts:291-309 and THERE it IS wrapped in nested `Promise.all`. So the
+    diff does the identical thing two different ways in one function.
+    Mitigating: the comment is honest, and on a cold cache the first iteration
+    genuinely must resolve before the rest can hit the cache, so serialising is
+    not free of reason. I rank this below the type findings.
+
+(i) CONFIRMED — a real stale guard.
+    utils.ts:151-152:
+      151  // eslint-disable-next-line prefer-const -- alephFormulaArgs is modified
+      152  let { nFormulas, alephFormulaArgs, input, alephFormula } = splitAlephFormula(formula);
+    The justification "alephFormulaArgs is modified" was TRUE in the old .js
+    (diff removed the line `alephFormulaArgs = alephFormulaArgs.map((arg) =>
+    cleanPiece(arg));`). The diff replaced it with a NEW const at
+    utils.ts:174: `  const alephFormulaArgPieces = alephFormulaArgs.map((arg) => cleanPiece(arg));`
+    So nothing in the function reassigns `alephFormulaArgs` any more. The `let`
+    should be `const` and the eslint-disable + its stated reason should be
+    deleted. Exactly "Remove casts and guards that a refactor made
+    unnecessary." Also note the JSDoc directly above (utils.ts:145-149) now has
+    a stray empty ` *` line where the diff stripped the @param/@returns block.
+
+(j) REFUTED — no TYPETODO convention is written down anywhere.
+    RAN: grep -rn "TYPETODO" --include=* . | grep -v node_modules | wc -l
+    OUTPUT: 81  (so the marker is well-established in code)
+    RAN: grep -rn "TYPETODO" --include="*.md" --include="*.mdc" --include="*.json" .
+         | grep -v node_modules
+    OUTPUT: (empty)
+    => TYPETODO appears 81 times in source but ZERO times in any .md/.mdc/.json.
+    There is no documented convention (no ticket-reference requirement, no
+    ban). I therefore CANNOT charge the TYPETODO markers themselves. I will
+    only charge the underlying `@ts-expect-error` against AGENTS.md L49.
+
+(k) DONE. See STEP 3. lint exit 0 (508/520 warnings), types:check clean.
+    Environment did not block anything. Used pnpm only, never npx.
+
+
+--- STEP 5: extra duplication I found that was not in my brief -----------------
+
+READ utils.ts 348-392 and 880-933 side by side. `getRowDimensions`
+(utils.ts:355-377) and `getRowDimensionsNew` (utils.ts:907-933) are ~22 lines of
+IDENTICAL control flow in the SAME file, differing only in
+`table.getDimensionByValue(dimension)!` (357) vs
+`table.getDimensionByAnyMatch(dimension)` (909), and in how each dodges the
+resulting `undefined` (`!` at 357 vs `@ts-expect-error` at 930).
+Likewise `getColumnDimensions` (utils.ts:382-392) and
+`getColumnDimensionsNew` (utils.ts:889-905) are the same loop written twice.
+BOTH halves of each pair are inside the diff: the `*New` functions were MOVED
+into this file by the diff (from the deleted newUtils.ts) and the plain ones
+were rewritten in TS by the diff. This is squarely AGENTS.md L39
+"If the same logic appears twice in your diff, extract a helper." — and it is
+the reason two DIFFERENT escape hatches (`!` and `@ts-expect-error`) exist for
+one and the same missing narrowing, which is also L55 "Never patch the same
+value in more than one place."
+The lint output independently flags both halves symmetrically, which is a nice
+confirmation they are twins:
+  utils.ts:375:16: warning unicorn(prefer-array-some)
+  utils.ts:931:16: warning unicorn(prefer-array-some)
+
+
+--- STEP 6: things I explicitly decided NOT to report --------------------------
+
+* apps/gs-addin/src/client/utils/formulaUtils.ts:51-54 and 58-61 — the
+  `if (!m) // comment\n{` brace-on-next-line-after-a-trailing-comment shape is
+  ugly, but no governing file has a brace-placement or comment-placement rule.
+  Style preference. DROPPED.
+* apps/addin-components/src/hooks/useDrillDown.jsx catch-param rename `e` ->
+  `error` — that's the diff SATISFYING oxlint's unicorn(catch-error-name), not
+  violating anything. Not a finding.
+* `Boolean(ALEPH_FORMULA_REGEX.test(s))` in gs-addin formulaUtils.ts:39 — the
+  `Boolean()` wrapper around an already-boolean `.test()` is redundant, but no
+  written rule covers it. DROPPED (belongs to the simplification angle).
+* apps/server AGENTS.md "Avoid `as` type casts" — checked
+  apps/server/src/operations/alephFunction.ts diff; it adds only brace-wrapping
+  and one `|| !parsed.alephFormula`. No casts. REFUTED for the server-specific
+  rule (the file still participates in my finding #4 under the root-level
+  "Never patch the same value in more than one place").
+* packages/global-common-utils/src/types.ts `SheetWithoutActive` — a genuinely
+  new, broadly useful type placed in the shared package. AGENTS.md L38 says
+  "Genuinely new, broadly useful helpers go in a shared location" — this
+  COMPLIES. Not a finding.
+* The `no-accumulating-spread` warnings at utils.ts:274 and 282 — pre-existing
+  reduce-with-spread logic carried over unchanged from the .js file. Not
+  introduced by the diff. DROPPED.
+
+================================================================================
+5. CANDIDATES
+================================================================================
+
+--------------------------------------------------------------------------------
+C1. packages/addin-core/src/operations/buildExplores/utils.ts:357
+    (plus 497, 715, 728, 729, 771, 795, 819)
+SUMMARY: The .js -> .ts migration adds 8 non-null assertions rather than
+    narrowing, silencing the exact `undefined` cases the migration was supposed
+    to surface.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, symlink -> AGENTS.md, line 49):
+    "Narrow with type guards, not `@ts-expect-error`, casts, or non-null
+     assertions. A `!` usually means restructure so the type flows (e.g.
+     iterate map entries instead of keys + `.get(key)!`)."
+OFFENDING LINES (verbatim):
+    357: `  const filters = Object.keys(dimensionFilterMap).map((dimension) => table.getDimensionByValue(dimension)!);`
+    497: `          table.getDimensionByValue(dimension, { ignoreCase: true })!;`
+    715: `  const explore = explores.find((e) => e.sheet!.id === activeSheet.id);`
+    728: `      row: start + explore.previousRowsCount!,`
+    729: `      column: explore.originColumnIndex + explore.previousColumnsCount!,`
+    771: `          dimension: normalizeName(dimension!.value),`
+    795: `          dimension: normalizeName(dimension!.value),`
+    819: `          dimension: normalizeName(dimension!.value),`
+NOTE: 357 is literally the `keys + lookup!` anti-pattern the rule names as its
+    example. 771/795/819 are the same assertion tripled.
+
+--------------------------------------------------------------------------------
+C2. packages/addin-core/src/operations/buildExplores/utils.ts:930
+SUMMARY: A `@ts-expect-error Table is yet not fully typed...` survived the
+    migration even though the diff removed its four siblings by typing
+    `Table.dimensionGroups`; the surviving one suppresses a DIFFERENT error
+    (`Dimension | undefined` from getDimensionByAnyMatch), so its stated reason
+    is now false.
+RULES (/Users/colton/code/monorepo/CLAUDE.md, lines 51 and 49):
+    "Remove casts and guards that a refactor made unnecessary."
+    "Narrow with type guards, not `@ts-expect-error`, casts, or non-null
+     assertions."
+OFFENDING LINES (verbatim):
+    930: `      // @ts-expect-error Table is yet not fully typed...`
+    931: `      !filters.find((dimension) => dimension.value === value) && !parentDimensionTexts.has(text),`
+EVIDENCE: packages/addin-core/src/entities/Table.ts now declares
+    `dimensionGroups?: DimensionGroup[];`, and utils.ts:909 leaves
+    `table.getDimensionByAnyMatch(dimension)` un-narrowed. Fix is
+    `dimension?.value`.
+
+--------------------------------------------------------------------------------
+C3. packages/addin-core/src/operations/buildExplores/utils.ts:907
+    (twin at :355; also :889 vs :382)
+SUMMARY: `getRowDimensionsNew` and `getRowDimensions` are ~22 identical lines in
+    the same file, both inside the diff; same for
+    `getColumnDimensionsNew`/`getColumnDimensions`.
+RULES (/Users/colton/code/monorepo/CLAUDE.md, lines 39 and 55):
+    "If the same logic appears twice in your diff, extract a helper."
+    "Never patch the same value in more than one place."
+OFFENDING LINES (verbatim, the only real difference between the twins):
+    357: `  const filters = Object.keys(dimensionFilterMap).map((dimension) => table.getDimensionByValue(dimension)!);`
+    909: `  const filters = Object.keys(dimensionFilterMap).map((dimension) => table.getDimensionByAnyMatch(dimension));`
+NOTE: the duplication is why one twin uses `!` and the other
+    `@ts-expect-error` for the identical missing narrowing.
+
+--------------------------------------------------------------------------------
+C4. packages/addin-core/src/operations/buildExplores/utils.ts:135
+    (second site :171; third site apps/server/src/operations/alephFunction.ts:102)
+SUMMARY: The new `ParsedAlephFormula` union never narrows, so the same guard is
+    hand-written in three consumers instead of being fixed in
+    `splitAlephFormula`'s return type.
+RULES (/Users/colton/code/monorepo/CLAUDE.md, lines 55 and 39):
+    "Never patch the same value in more than one place."
+    "If the same logic appears twice in your diff, extract a helper."
+OFFENDING LINES (verbatim):
+    utils.ts:134-136:
+      `  if (!alephFormulaArgs) {`
+      `    throw new Error('Expected aleph formula to have args');`
+      `  }`
+    utils.ts:170-172:
+      `  if (!alephFormulaArgs) {`
+      `    throw new Error('Expected aleph formula to have args');`
+      `  }`
+    apps/server/src/operations/alephFunction.ts:102:
+      `  if (!parsed || !parsed.alephFormula) {`
+ROOT CAUSE (utils.ts:118-127): the union is keyed on optional-vs-required
+    fields, not on a discriminant reachable from `nFormulas`.
+
+--------------------------------------------------------------------------------
+C5. packages/addin-core/src/operations/buildExplores/utils.ts:4
+    (also :35-36 and :38-39)
+SUMMARY: Three duplicate-module import pairs introduce three new
+    `import(no-duplicates)` warnings from the repo's configured oxlint rule.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, lines 12 & 14):
+    "Use **pnpm** exclusively ... `pnpm run lint`, `pnpm run test`,
+     `pnpm run types:check`, `pnpm run build` — run from the app directory"
+    enforcing /Users/colton/code/monorepo/.oxlintrc.json:132
+    `"no-duplicates": "warn",`
+OFFENDING LINES (verbatim):
+    4:  `import { appendAndFilterToFilterGroup } from '@getaleph/global-common-utils';`
+    5:  `import { CellValue, Connect, Sheet, SheetWithoutActive } from '@getaleph/global-common-utils';`
+    36: `import { SpreadsheetInput } from '../../transformers';`
+    39: `import { getConnectWithModifiedDimensionRanges } from '../connects';`
+MEASURED (verbatim from `pnpm -F @getaleph/addin-core run lint`):
+    src/operations/buildExplores/utils.ts:4:46: warning import(no-duplicates): ...
+    src/operations/buildExplores/utils.ts:35:8: warning import(no-duplicates): ...
+    src/operations/buildExplores/utils.ts:38:37: warning import(no-duplicates): Module '../connects' is imported more than once in this file
+    Package is at 508 warnings vs `--max-warnings=520`. Lint still exits 0.
+
+--------------------------------------------------------------------------------
+C6. packages/addin-core/src/operations/buildExplores/utils.ts:151
+SUMMARY: The `prefer-const` eslint-disable and its stated justification are
+    stale — the refactor removed the reassignment of `alephFormulaArgs`.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, line 51):
+    "Remove casts and guards that a refactor made unnecessary."
+OFFENDING LINES (verbatim):
+    151: `  // eslint-disable-next-line prefer-const -- alephFormulaArgs is modified`
+    152: `  let { nFormulas, alephFormulaArgs, input, alephFormula } = splitAlephFormula(formula);`
+EVIDENCE: the diff deleted `alephFormulaArgs = alephFormulaArgs.map((arg) =>
+    cleanPiece(arg));` and replaced it with utils.ts:174
+    `  const alephFormulaArgPieces = alephFormulaArgs.map((arg) => cleanPiece(arg));`
+    Nothing reassigns `alephFormulaArgs` any more.
+
+--------------------------------------------------------------------------------
+C7. apps/addin-components/src/components/ActionButtons/ActionButtonsWrapper.tsx:125
+    (second site apps/web-ui/src/pages/Workbooks/Workbook/Workbook.tsx:1011)
+SUMMARY: After the diff gave `DrillDownButton.getDrillDownByOptions` a real
+    `Dimension[]` type, both call sites were silenced with `@ts-expect-error`
+    instead of typing the producers.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, line 49):
+    "Narrow with type guards, not `@ts-expect-error`, casts, or non-null
+     assertions."
+    (plus line 48: "**Fix the root type instead of casting.** ... find where the
+     value lost its type (untyped upstream field, missing generic, stale schema)
+     and fix it there.")
+OFFENDING LINES (verbatim):
+    ActionButtonsWrapper.tsx:125: `        // @ts-expect-error TYPETODO: useDrilldown needs to be typed`
+    Workbook.tsx:1011:           `                  // @ts-expect-error TYPETODO: getDrillDownByOptions is not typed yet`
+NOTE: the comments themselves name the untyped upstream
+    (apps/addin-components/src/hooks/useDrillDown.jsx, still .jsx and touched by
+    this same diff), i.e. the root cause was located and left unfixed.
+    Also refuted separately: there is NO written TYPETODO convention anywhere
+    (81 code occurrences, 0 in any .md/.mdc/.json), so the marker itself is not
+    chargeable — only the suppression is.
+
+--------------------------------------------------------------------------------
+C8. packages/addin-core/tests/operations/buildExplores/findConnectedTablesInRange.test.ts:29
+    (second site :37)
+SUMMARY: Both new test fixture builders launder their object literals through
+    `as unknown as Connect`, so the fixtures are free to drift from the real
+    `Connect` shape they claim to model.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, line 48):
+    "**Fix the root type instead of casting.** `as any` / `as unknown as X` is
+     rarely the answer and should be avoided when possible — find where the
+     value lost its type (untyped upstream field, missing generic, stale schema)
+     and fix it there."
+OFFENDING LINES (verbatim):
+    29: `  }) as unknown as Connect;`
+    37: `  }) as unknown as Connect;`
+NOTE: the diff itself widened `Connect.sheet` to `SheetWithoutActive` in
+    packages/global-common-utils/src/connectUtils.ts precisely so partial sheets
+    would typecheck, which suggests a `Partial<Connect>`/builder or a narrower
+    param type would remove the need for the double cast entirely.
+
+--------------------------------------------------------------------------------
+C9 (LOWER RANK, arguable — included for recall).
+    packages/addin-core/src/operations/buildExplores/utils.ts:254
+SUMMARY: Independent awaits are serialised in a `for` loop with a lint
+    suppression, while the identical traversal 40 lines later uses `Promise.all`.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, line 59):
+    "`Promise.all` independent awaits — sequential awaits are only for real data
+     dependencies."
+OFFENDING LINES (verbatim):
+    257: `        // No need to Promise.all since the only async call is cached`
+    258: `        // oxlint-disable-next-line no-await-in-loop`
+    259: `        const { cell, sheet } = await splitCellAndSheet(arg, activeSheet);`
+CONTRAST (same function, utils.ts:293-297):
+    `      const cleanValues = await Promise.all(`
+    `        args.map(async (arg) => {`
+    `          ...`
+    `            const { cell, sheet } = await splitCellAndSheet(arg, activeSheet);`
+JUDGEMENT: no real data dependency exists between iterations, so the rule's only
+    stated exception does not apply; but the author's comment is an honest
+    performance rationale and a cold cache does make the first call special.
+
+--------------------------------------------------------------------------------
+C10 (LOWEST RANK, likely cut).
+    packages/addin-core/src/operations/buildExplores/utils.ts:649
+SUMMARY: `?? NaN` fallbacks introduced to satisfy the compiler, with no comment
+    explaining why NaN is an acceptable coordinate.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, line 43):
+    "Prefer plain, slightly longer code over dense one-liners and clever tricks.
+     An explicit prop or flag beats indirect control. Add a brief \"why\" comment
+     on non-obvious transforms."
+OFFENDING LINES (verbatim):
+    649: `      row: (lastRowSubrange.cellStart.row ?? NaN) - 1,`
+    650: `      column: (lastRowSubrange.cellStart.column ?? NaN) + 1,`
+
+--------------------------------------------------------------------------------
+C11 (LOWEST RANK, cut from JSON output — see (f) above).
+    packages/global-common-utils/src/connectUtils.ts:9 and :17
+SUMMARY: The inline `specialConnectFilter?: { isOn?: boolean }` shape is written
+    twice in one new file, while
+    packages/addin-core/src/entities/ConnectedTable.ts:20 already names that
+    concept `SpecialConnectFilter`.
+RULE (/Users/colton/code/monorepo/CLAUDE.md, lines 50 and 39):
+    "Reuse exported types instead of re-deriving them ... export the type from
+     its home module if needed. Import library-declared types rather than
+     redeclaring them."
+    "If the same logic appears twice in your diff, extract a helper."
+MITIGATION: global-common-utils is the dependency floor and cannot import from
+    addin-core, so only the intra-file duplication is fairly chargeable.
