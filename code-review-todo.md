@@ -16,11 +16,6 @@ Findings carry `verdict` (confidence) and `category` (angle), but not impact. `r
 
 The verifier has already read the code closely enough to confirm the bug. An optional `suggested_fix` on `GROUP_VERDICT_SCHEMA` costs almost nothing there, makes the report actionable, and means `--fix` isn't re-deriving from scratch in a context that never saw the file.
 
-## 5. Scale and noise
-
-- **Generated files.** Nothing classifies `*.lock`, `dist/`, snapshots, generated protobufs, or vendored code. On a real PR these dominate the diff and eat both the diff artifact and the candidate budget. Scope should split `files` into reviewable vs generated and exclude the latter from the materialized diff (mentioning the exclusion).
-- **No sharding.** Fan-out is fixed at 5+1 finders regardless of diff size — one finder per angle over a 5,000-line diff produces thin coverage. `SKILL.md:125` promises a `ceil(diff_lines / 150)` clamped `[2,8]` finder budget, but the workflow path ignores it entirely: `LEVEL_PARAMS` is static and nothing reads `--numstat`. Either wire it in (shard the file list and run angles × shards through `pipeline`) or delete the claim — right now the skill documents a behavior that doesn't exist.
-
 ## 6. Say what wasn't covered
 
 Every agent is time-boxed and told to "note it and move on", but nothing collects those notes, so a review where three finders bailed on a slow typecheck reads identically to one where everything succeeded. The ultra critic is the only thing in this space, and it doesn't reach the report. I'd return a `coverage` field (files never opened, commands abandoned, angles that returned empty for lack of access) and have the skill print it as one line under the tally.
