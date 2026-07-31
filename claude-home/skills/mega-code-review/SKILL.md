@@ -1,6 +1,6 @@
 ---
-name: colton-code-review
-description: Runs a multi-agent code review of a diff, branch, PR, or file — a fleet of specialized subagents each review the change from a different angle (security, correctness, performance, style, test coverage, architecture, dependencies, docs drift), findings are deduplicated and ranked by severity. Use whenever the user asks to "review my code/changes/branch/PR", "code review", "check this diff", or invokes it explicitly as /colton-code-review. Supports effort levels (quick, standard, max) to trade speed for thoroughness.
+name: mega-code-review
+description: Runs a multi-agent code review of a diff, branch, PR, or file — a fleet of specialized subagents each review the change from a different angle (security, correctness, performance, style, test coverage, architecture, dependencies, docs drift), findings are deduplicated and ranked by severity. Use whenever the user asks to "review my code/changes/branch/PR", "code review", "check this diff", or invokes it explicitly as /mega-code-review. Supports effort levels (quick, standard, max) to trade speed for thoroughness.
 ---
 
 # Code Review Max
