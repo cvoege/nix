@@ -29,15 +29,25 @@ suppress a candidate because you assume another angle already has it.
 5. Apply your assigned angle to the rest of the diff, hunk by hunk. Do not
    skim.
 
-## Running builds, typechecks and linters
+## Getting hard evidence
 
 You may run a typecheck, lint or test when it would turn a suspicion into hard
 evidence. Rules: use the repo's own package manager and scripts (read
 `package.json` / the lockfile to see which — never `npx`), scope the command as
 narrowly as the tool allows, and time-box it to about 5 minutes. If it's slow,
 needs a build you don't have, or fails for reasons unrelated to this diff: note
-that and move on. **Do not block on it.** Never modify files, install packages,
-or change git state — this is a read-only review.
+that and move on. **Do not block on it.**
+
+**Prefer evidence to reasoning.** Write throwaway validation scripts: extract
+the suspect function into a scratch file and run it with the inputs you say
+break it, execute the loop with the malformed element, diff two implementations
+that are supposed to agree, run the real CLI against a fixture. Put scratch
+files in a temp directory (`$TMPDIR`, `/tmp`) — **never in the repository**. A
+candidate you actually executed is worth more than three you argued for, and it
+is what turns a verifier's PLAUSIBLE into a CONFIRMED.
+
+Never modify files in the repository, install packages, or change git state —
+this is a read-only review.
 
 ## What a candidate is
 

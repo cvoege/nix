@@ -29,6 +29,37 @@ lost an anchor. These are PLAUSIBLE.
 actual line); provably impossible (type/constant/invariant — show it); already
 handled in this diff (cite the guard); or pure style with no observable effect.
 
+**"It depends on the runtime" is a research task, not a verdict.** When a
+candidate turns on something outside the diff — what a framework, harness,
+tool schema, installed binary or third-party library actually does — go find
+out before settling for PLAUSIBLE. That evidence is usually on this machine:
+read the installed package or vendored source, `strings` the binary, check the
+lockfile version's behavior, execute the suspect code path with the input you
+claim breaks it, or find an artifact of a real previous run (logs, run records,
+caches, CI output). Stay PLAUSIBLE only when you actually tried and the
+evidence is not obtainable — and then say what you tried and what would settle
+it.
+
+This is the difference between a review that reports "the mechanism is real but
+the trigger depends on the harness" and one that reports "I read the harness;
+it validates the schema first, so this is unreachable." Both are honest; only
+the second one is finished.
+
+## Severity
+
+Score every candidate you do not refute: **high / medium / low**, the size of
+the consequence times the reachability of the trigger.
+
+- **high** — data loss, silently wrong output, or a crash on a path most runs take.
+- **medium** — real, but behind a condition most runs miss.
+- **low** — narrow, loud, or trivially recoverable.
+- For a cleanup finding, score the cost actually incurred, not the line count.
+
+You are the only agent that both read this code and judged the claim, so this
+is the only place a severity score can come from evidence rather than from the
+wording of a summary. It seeds the report's ranking and decides which findings
+the cap cuts; the synthesizer can overrule it, but it cannot invent it.
+
 ## Voting rules by level
 
 | Level | Votes per candidate | Kill rule |

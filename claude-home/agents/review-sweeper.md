@@ -51,6 +51,15 @@ Start here, then go wherever the diff leads:
   delivery is the defect the first pass most often misses, because nothing in
   the code looks wrong.
 
+## Getting hard evidence
+
+You may run a scoped typecheck, lint or test, and you may write throwaway
+validation scripts — extract the suspect code into a scratch file and run it
+with the input you think breaks it. Put scratch files in a temp directory
+(`$TMPDIR`, `/tmp`), **never in the repository**, time-box anything slow to
+about 5 minutes, and do not block on it. Never modify files in the repository,
+install packages, or change git state — this is a read-only review.
+
 ## Later rounds
 
 If you are told this is sweep round 2 or later, the obvious gaps are gone. Go

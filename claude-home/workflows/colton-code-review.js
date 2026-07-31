@@ -36,7 +36,7 @@ export const meta = {
 // per correctness angle AND one per cleanup lens, so the workflow path and the
 // inline path now run the identical fan-out.
 //   high  → 3 correctness + 5 cleanup (8 agents, ≤48 cands) → ≤10 findings
-//   xhigh → 5 correctness + 5 cleanup (10 agents, ≤80 cands) → sweep → ≤15 findings
+//   xhigh → 6 correctness + 5 cleanup (11 agents, ≤88 cands) → sweep → ≤15 findings
 //   max   → same structure as xhigh (the reasoning effort differs, not the fan-out)
 //   ultra → same fan-out, 3-vote adversarial verify, sweep loops until dry → ≤25 findings
 //
@@ -49,11 +49,14 @@ export const meta = {
 // so no slot is ever left empty to honour it.
 const LEVEL_PARAMS = {
   high:  { correctnessAngles: 3, perAngle: 6, maxFindings: 10, cleanupSlots: 2, sweep: false, sweepRounds: 0, votes: 1, effort: undefined },
-  xhigh: { correctnessAngles: 5, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'xhigh' },
-  max:   { correctnessAngles: 5, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'max' },
-  ultra: { correctnessAngles: 5, perAngle: 8, maxFindings: 25, cleanupSlots: 5, sweep: true,  sweepRounds: 6, votes: 3, effort: 'max' },
+  xhigh: { correctnessAngles: 6, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'xhigh' },
+  max:   { correctnessAngles: 6, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'max' },
+  ultra: { correctnessAngles: 6, perAngle: 8, maxFindings: 25, cleanupSlots: 5, sweep: true,  sweepRounds: 6, votes: 3, effort: 'max' },
 }
 const SWEEP_MAX = 8
+// Worst first. The verifier scores each defect; the ordering here is what the
+// fallback rank and the backfill loop walk.
+const SEVERITIES = ['high', 'medium', 'low']
 // ultra stops after this many consecutive sweeps that surface nothing new.
 const DRY_ROUNDS_TO_STOP = 2
 // Defects per verifier agent. Small enough that the verifier can read the code
@@ -147,6 +150,23 @@ through a registry/session/global — e.g. a caching provider holding a
 wrapper forwards all the methods the callers actually use.
 `,
   },
+  {
+    label: 'angle-F',
+    text: `### Angle F — untrusted input & injection surfaces
+
+Trace every value the diff lets in from outside the program — CLI args, HTTP
+request fields, file contents, environment variables, a database row, a PR body
+or commit message, a ticket description, a model's output, another service's
+response — from where it enters to where it is finally used. The defect is a
+value that crosses from data into control: interpolated into SQL, a shell
+command, a path, a URL, HTML, a regex, a format string, or into a prompt whose
+surrounding instructions the value can then forge. At each boundary name the
+escape / parameterize / allowlist / fence step that is missing, and check
+whether anything downstream trusts the value because it "already came from us".
+Also flag unbounded untrusted input: no length cap, no depth or recursion
+limit, no timeout on work an outsider controls.
+`,
+  },
 ]
 
 // One finder per cleanup lens, exactly as on the inline path. These used to
@@ -229,7 +249,18 @@ lost an anchor. These are PLAUSIBLE.
 
 **REFUTED** only when constructible from the code: factually wrong (quote the
 actual line); provably impossible (type/constant/invariant — show it); already
-handled in this diff (cite the guard); or pure style with no observable effect.`
+handled in this diff (cite the guard); or pure style with no observable effect.
+
+**"It depends on the runtime" is a research task, not a verdict.** When a
+candidate turns on something outside the diff — what a framework, harness,
+tool schema, installed binary or third-party library actually does — go find
+out before settling for PLAUSIBLE. That evidence is usually on this machine:
+read the installed package or vendored source, \`strings\` the binary, check the
+lockfile version's behavior, execute the suspect code path with the input you
+claim breaks it, or find an artifact of a real previous run (logs, run records,
+caches, CI output). Stay PLAUSIBLE only when you actually tried and the
+evidence is not obtainable — and then say what you tried and what would settle
+it.`
 
 const CLEANUP_PRECEDENCE = `Cleanup, altitude, and conventions candidates use the same
 \`file\`/\`line\`/\`summary\` shape; in \`failure_scenario\`, state the concrete
@@ -244,18 +275,28 @@ non-determinism, lock-scope shrink, predicate methods with side effects);
 setup/teardown asymmetry in tests; config defaults flipped; pieces of the
 stated intent the diff promises but never delivers.`
 
-// Finders may run builds, typechecks or linters to get hard evidence. Fence
-// that: an agent blocked for twenty minutes on a cold monorepo build has
-// spent the whole review's wall-clock and returned nothing.
-const TOOL_GUARDRAILS = `## Running builds, typechecks and linters
+// Agents may run builds/typechecks and write throwaway validation scripts to
+// get hard evidence. Fence both: an agent blocked for twenty minutes on a cold
+// monorepo build has spent the whole review's wall-clock and returned nothing,
+// and a scratch script written into the repo mutates the tree under review.
+const TOOL_GUARDRAILS = `## Getting hard evidence
 
 You may run a typecheck, lint or test command when it would turn a suspicion
 into hard evidence. Rules: use the repo's own package manager and scripts (read
 package.json / the lockfile to see which — never \`npx\`), scope the command as
 narrowly as the tool allows, and time-box it to about 5 minutes. If it is slow,
 needs a build you don't have, or fails for reasons unrelated to this diff: note
-that and move on. Do NOT block on it. Never modify files, install packages, or
-change git state — this is a read-only review.
+that and move on. Do NOT block on it.
+
+**Prefer evidence to reasoning.** Write throwaway validation scripts: extract
+the suspect function into a scratch file and run it with the inputs you say
+break it, execute the loop with the malformed element, diff two
+implementations that are supposed to agree, run the actual CLI against a
+fixture. Put every scratch file in a temp directory (\`$TMPDIR\`, /tmp) — never
+in the repository. One claim you executed beats three you argued for.
+
+Never modify files in the repository, install packages, or change git state —
+this is a read-only review.
 `
 
 // Every fan-out phase passes `agentType`, so the role definitions in
@@ -359,6 +400,11 @@ const POOL_SCHEMA = {
       properties: {
         theme: { type: 'string', description: 'short label for the mechanism or subsystem this batch is about, e.g. "verify-phase vote accounting" or "PR-stack skills: git stack preconditions"' },
         contradictions: { type: 'string', description: 'where the candidates in this batch disagree with each other — two finders reaching opposite conclusions about the same code, or one asserting a guard exists that another says is missing. State what the verifier must settle and against which code. Omit when there is no disagreement.' },
+        // Batches whose claims bottom out in something outside the diff are
+        // settled by an investigation, not by re-reading the diff. Naming
+        // where that evidence lives is what stops the verifier concluding
+        // "the runtime is not in this repo" and returning PLAUSIBLE.
+        investigate: { type: 'string', description: 'when this batch turns on something OUTSIDE the diff — what a framework, harness, tool schema, installed binary or dependency actually does — name where the evidence lives so the verifier goes and gets it: the installed package or binary path, the lockfile entry, a vendored source tree, a prior run artifact or log. Omit when every claim can be settled from the diff and the repo.' },
         clusters: { type: 'array', items: {
           type: 'object', required: ['members'],
           properties: {
@@ -377,6 +423,11 @@ const BATCH_VERDICT_SCHEMA = {
       properties: {
         index: { type: 'number', description: 'the [i] label of the candidate this verdict is for' },
         verdict: { enum: ['CONFIRMED', 'PLAUSIBLE', 'REFUTED'] },
+        // The verifier is the only agent that has both read the code and
+        // judged the claim, so it is the right place to score severity. It
+        // feeds the fallback ranking and the backfill order, both of which
+        // were otherwise severity-blind.
+        severity: { enum: ['high', 'medium', 'low'], description: 'size of the consequence times reachability of the trigger, judged from the code you just read. high = data loss, silent wrong output, or a crash on a common path. medium = real but behind a condition most runs miss. low = narrow, loud, or trivially recoverable. For a cleanup finding, score the cost actually incurred. Omit only if you truly cannot tell.' },
         evidence: { type: 'string' },
       },
     } },
@@ -391,6 +442,10 @@ const REPORT_SCHEMA = {
       properties: {
         index: { type: 'number', description: 'the [i] label of a finding to keep in the report' },
         merge: { type: 'array', items: { type: 'number' }, description: '[i] labels of findings that describe the same root cause, folded into this one' },
+        // Without this the merge-and-rank reasoning — the one thing this phase
+        // produces that nothing upstream has — is discarded, and the report is
+        // an ordered list nobody can audit.
+        rationale: { type: 'string', description: 'one or two sentences: why this defect ranks here, and (when you merged anything into it) what you checked in the code to conclude those are the same root cause. Not a restatement of the finding.' },
       },
     } },
   },
@@ -635,11 +690,16 @@ const BATCH_VERIFIER_PROMPT = (batch, lens) =>
     ? '## Disagreements you must settle\n' + batch.contradictions + '\n\n' +
       'Different finders read this code and reached conflicting conclusions. Do not average them and do not hedge: read the code, decide which reading is right, and quote the line that decides it. Settling this is the reason these candidates were batched together.\n\n'
     : '') +
+  (batch.investigate
+    ? '## Where the evidence for this batch lives\n' + batch.investigate + '\n\n' +
+      'These claims bottom out in something outside the diff, so re-reading the diff cannot settle them — go get the evidence named above. Returning PLAUSIBLE because "that runtime/library is not in this repo" is not a verdict; it is the investigation you were batched to do.\n\n'
+    : '') +
   TOOL_GUARDRAILS + '\n' +
   'Read the diff, read the relevant file(s) in full — the whole enclosing function, not just the cited line — and return one verdict per candidate. ' +
   'Judge EACH candidate independently on its own claim. Reference each by its [i] index.\n\n' +
   (lens ? 'Your assigned lens for this pass: ' + lens + '\nTry to REFUTE each candidate through that lens. Only return REFUTED when you can construct the refutation from the code.\n\n' : '') +
   VERDICT_LADDER + '\n\n' + VERDICT_LADDER_RECALL + '\n\n' +
+  'Also score each candidate\'s `severity` — high / medium / low, the size of the consequence times the reachability of the trigger, judged from the code you just read. You are the only agent that both read this code and judged the claim, and the report is ranked with your score.\n\n' +
   'Structured output only. Evidence must quote or cite the relevant line(s).'
 
 // Lens roster is fixed for the whole run, so the spawn count per batch is too.
@@ -667,12 +727,13 @@ function buildBatches(candidates, pool) {
     raw.push({
       theme: typeof b.theme === 'string' && b.theme.trim() ? b.theme.trim() : 'unlabelled',
       contradictions: typeof b.contradictions === 'string' ? b.contradictions.trim() : '',
+      investigate: typeof b.investigate === 'string' ? b.investigate.trim() : '',
       units,
     })
   }
   const leftovers = candidates.filter((_, i) => !claimed.has(i)).map(c => ({ ...c, dupes: [] }))
   if (leftovers.length > 0) {
-    raw.push({ theme: 'candidates the pool did not cluster', contradictions: '', units: leftovers })
+    raw.push({ theme: 'candidates the pool did not cluster', contradictions: '', investigate: '', units: leftovers })
     if (claimed.size > 0) log('pool: ' + leftovers.length + ' candidate(s) left unclustered — verified individually')
   }
   // Split oversized batches so no verifier is asked to judge more defects than
@@ -680,7 +741,7 @@ function buildBatches(candidates, pool) {
   const out = []
   for (const b of raw) {
     for (let i = 0; i < b.units.length; i += BATCH_MAX) {
-      out.push({ theme: b.theme, contradictions: b.contradictions, units: b.units.slice(i, i + BATCH_MAX) })
+      out.push({ theme: b.theme, contradictions: b.contradictions, investigate: b.investigate, units: b.units.slice(i, i + BATCH_MAX) })
     }
   }
   return out
@@ -728,7 +789,11 @@ async function verifyBatches(batches) {
         ? 'REFUTED'
         : (vs.some(v => v.verdict === 'CONFIRMED') ? 'CONFIRMED' : 'PLAUSIBLE')
       const evidence = vs.map(v => v.evidence).filter(Boolean).join(' | ')
-      return [{ ...u, verdict, evidence, votes: vs.length, refutes }]
+      // Worst score any verifier gave it. An omitted score falls back to
+      // medium rather than to the bottom, so a missing field never buries a
+      // finding under one a verifier explicitly called low.
+      const severity = SEVERITIES.find(s => vs.some(v => v.severity === s)) || 'medium'
+      return [{ ...u, verdict, evidence, severity, votes: vs.length, refutes }]
     })
   }))
   return out.filter(Boolean).flat()
@@ -944,13 +1009,19 @@ if (surviving.length === 0) {
 
 // ─── Synthesize: read the code, merge by root cause, rank by severity, cap ───
 phase('Synthesize')
-// This ordering is only the fallback and the display order. Real severity
-// ranking is the synthesizer's job — it has the diff and the repo, and severity
-// is a property of the code, not of the two flags available here.
-const rank = c => (c.kind === 'cleanup' ? 2 : 0) + (c.verdict === 'PLAUSIBLE' ? 1 : 0)
+// Ordering for the synthesizer's input, the backfill loop, and the display
+// order when synthesis is unusable. The severity term comes from the verifier,
+// which is the only agent that both read the code and judged the claim — before
+// it existed this order was severity-blind and the backfill loop walked it,
+// so a cosmetic CONFIRMED could take the last slot from a data-loss PLAUSIBLE.
+// The synthesizer still owns the final ranking; it has the whole repo.
+// Cleanup's offset exceeds the widest correctness spread (2*2+1), so
+// correctness always sorts ahead of cleanup regardless of severity.
+const sevRank = c => { const i = SEVERITIES.indexOf(c.severity); return i === -1 ? 1 : i }   // unscored ranks as medium
+const rank = c => (c.kind === 'cleanup' ? 6 : 0) + sevRank(c) * 2 + (c.verdict === 'PLAUSIBLE' ? 1 : 0)
 const ranked = surviving.slice().sort((a, b) => rank(a) - rank(b))
 const block = ranked.map((c, i) =>
-  '### [' + i + '] ' + loc(c) + ' (' + c.verdict + (c.kind === 'cleanup' ? ', cleanup' : ', correctness') + ')\n' +
+  '### [' + i + '] ' + loc(c) + ' (' + c.verdict + ', severity ' + (c.severity || 'medium') + (c.kind === 'cleanup' ? ', cleanup' : ', correctness') + ')\n' +
   c.summary + '\nFailure scenario: ' + c.failure_scenario + '\nVerifier evidence: ' + c.evidence + '\n' +
   (c.dupes && c.dupes.length > 0 ? 'Also raised at: ' + c.dupes.map(loc).join(', ') + '\n' : '')
 ).join('\n')
@@ -970,7 +1041,8 @@ const report = await agent(
   '## Your job\n' +
   'You have the diff and the whole repository. **Read them.** Do not decide from the finding text alone — open the cited file for anything you are about to merge, drop, or rank near the top. Two findings that read alike can be different defects, two that read differently can be one, and the text of a finding is a poor guide to how bad it is.\n\n' +
   '1. **Merge by root cause.** One decision per distinct defect. When several findings share a root cause, keep the best-described one as the primary and list the others in its `merge` array. Findings already annotated "Also raised at:" were clustered earlier — verify that clustering rather than assuming it, and merge across locations the earlier pass missed. Two findings in the same file at the same line are NOT automatically the same defect.\n' +
-  '2. **Rank by real severity, most severe first.** Severity is how bad the consequence is and how reachable the trigger — not which angle found it and not the order below. A CONFIRMED crash on a common path outranks a CONFIRMED cosmetic inconsistency. Within correctness, something that silently produces wrong output usually outranks something that fails loudly. Say why the top finding is the top finding in your summary.\n' +
+  '2. **Rank by real severity, most severe first.** Severity is how bad the consequence is and how reachable the trigger — not which angle found it and not the order below. A CONFIRMED crash on a common path outranks a CONFIRMED cosmetic inconsistency. Within correctness, something that silently produces wrong output usually outranks something that fails loudly. Each finding carries the severity its verifier scored: treat that as one input, not a verdict — the verifier saw one subsystem, you have the whole repo, so overrule it where the code says otherwise. Say why the top finding is the top finding in your summary.\n' +
+  '   Give each decision a one-or-two-sentence `rationale`: why it ranks where it does, and — when you merged anything into it — what you checked in the code to conclude those are one root cause. This is the only record of the reasoning behind the report\'s shape; without it the report is an ordered list nobody can audit.\n' +
   '3. **Budgets.** Keep at most ' + P.maxFindings + ' decisions total: up to ' + correctnessQuota + ' correctness and up to ' + cleanupQuota + ' cleanup. ' +
   (cleanupQuota > 0
     ? 'Those ' + cleanupQuota + ' cleanup slot(s) are RESERVED — correctness cannot spend them, so pick the ' + cleanupQuota + ' cleanup finding(s) with the highest real cost rather than letting cleanup fall off the end. '
@@ -1010,13 +1082,17 @@ const alsoNote = (primary, members) => {
   ))
   return others.length > 0 ? ' [same root cause also at: ' + others.join(', ') + ']' : ''
 }
-const entry = (c, extra) => ({
+// `severity` and `rationale` ride along for the reader and for whoever assembles
+// the ReportFindings call; they are not ReportFindings fields themselves.
+const entry = (c, extra, rationale) => ({
   file: c.file,
   line: c.line,
   summary: c.summary + (extra || ''),
   failure_scenario: c.failure_scenario,
   category: c.kind,
   verdict: c.verdict,
+  severity: c.severity || 'medium',
+  ...(rationale ? { rationale } : {}),
 })
 for (const d of decisions) {
   if (findings.length >= P.maxFindings) break
@@ -1033,7 +1109,8 @@ for (const d of decisions) {
   for (const m of merged) seen.add(m)
   const members = merged.map(i => ranked[i])
   const verdict = members.some(m => m.verdict === 'CONFIRMED') ? 'CONFIRMED' : c.verdict
-  findings.push({ ...entry(c, alsoNote(c, members)), verdict })
+  const rationale = typeof d.rationale === 'string' && d.rationale.trim() ? d.rationale.trim() : ''
+  findings.push({ ...entry(c, alsoNote(c, members), rationale), verdict })
 }
 const usedDecisions = findings.length > 0
 let backfilled = 0

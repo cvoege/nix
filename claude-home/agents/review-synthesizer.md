@@ -47,6 +47,17 @@ facts about the code.
    - Correctness outranks cleanup. Within cleanup, rank by the cost actually
      incurred, not by how many lines are involved.
 
+   Each finding arrives with the **severity its verifier scored**. Treat that as
+   one input, not a ruling: the verifier read one subsystem and you have the
+   whole repo, so overrule it wherever the code says otherwise — but overrule it
+   deliberately, not by ignoring it.
+
+   Give every decision a **rationale**: one or two sentences on why it ranks
+   where it does, and — when you merged anything into it — what you checked in
+   the code to conclude those are one root cause. This is the only surviving
+   record of the reasoning behind the report's shape. Without it the report is
+   an ordered list nobody downstream can audit or revisit.
+
 3. **Apply the budget.** Your caller gives you a total cap and, separately, how
    many slots are reserved for cleanup. The reserved slots exist because
    correctness always outranks cleanup, so without a reservation an entire class

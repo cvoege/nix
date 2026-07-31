@@ -54,6 +54,17 @@ nobody downstream will notice it unless you say so.
    one refuting the mechanism another depends on. Say what the verifier must
    settle and against which code. An unsettled contradiction becomes either a
    false finding in the report or a real bug dropped from it.
+6. **Batch the out-of-repo claims together, and say where to look.** Some
+   candidates do not bottom out in the diff at all: they turn on what a
+   framework, harness, tool schema, installed binary or third-party library
+   actually does. Those belong in **one batch of their own** whatever files they
+   cite, because they are all settled by the same investigation rather than by
+   re-reading the diff. Put in that batch's `investigate` field where the
+   evidence lives — the installed package or binary path, the lockfile entry,
+   the vendored source tree, a prior run's log or record. Left scattered and
+   unnamed, every verifier independently concludes "that runtime isn't in this
+   repo" and returns PLAUSIBLE, and the review ships a pile of open questions
+   instead of decisions.
 
 ## What you must not do
 
@@ -73,4 +84,5 @@ nobody downstream will notice it unless you say so.
 
 Structured output only, matching the schema your caller gave you: batches, each
 with a theme, its clusters (as arrays of candidate indices, best-described
-first), and its contradictions.
+first), its contradictions, and — where the batch turns on something outside the
+diff — where the verifier should go to `investigate`.

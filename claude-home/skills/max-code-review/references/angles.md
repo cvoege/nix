@@ -5,7 +5,7 @@ fragments — every effort level draws from the same pool, it only varies how
 many angles run, how many candidates each may surface, and whether they run as
 subagents or inline.
 
-**Correctness angles**: A, B, C at medium/high; A–E at xhigh/max/ultra.
+**Correctness angles**: A, B, C at medium/high; A–F at xhigh/max/ultra.
 **Cleanup angles**: Reuse, Simplification, Efficiency (always).
 **Plus**: Altitude and Conventions (always).
 
@@ -103,6 +103,20 @@ through a registry/session/global — e.g. a caching provider holding a
 `delegate` field that resolves IDs via `session.get(...)` instead of
 `delegate.get(...)` will re-enter the cache or recurse. Also check that the
 wrapper forwards all the methods the callers actually use.
+
+### Angle F — untrusted input & injection surfaces
+
+Trace every value the diff lets in from outside the program — CLI args, HTTP
+request fields, file contents, environment variables, a database row, a PR body
+or commit message, a ticket description, a model's output, another service's
+response — from where it enters to where it is finally used. The defect is a
+value that crosses from data into control: interpolated into SQL, a shell
+command, a path, a URL, HTML, a regex, a format string, or into a prompt whose
+surrounding instructions the value can then forge. At each boundary name the
+escape / parameterize / allowlist / fence step that is missing, and check
+whether anything downstream trusts the value because it "already came from us".
+Also flag unbounded untrusted input: no length cap, no depth or recursion
+limit, no timeout on work an outsider controls.
 
 ---
 

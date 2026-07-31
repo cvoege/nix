@@ -22,7 +22,7 @@ that is what makes the finders independent instead of redundant.
 | `low` | 1 diff pass, no verify, hunks only | ≤4 findings | — |
 | `medium` | 8 angles × 6 candidates → pool → 1-vote verify | ≤8 findings | 2 |
 | `high` | 8 angles × 6 candidates → pool → 1-vote verify (recall-biased) | ≤10 findings | 2 |
-| `xhigh` | 10 angles × 8 candidates → pool → 1-vote verify → sweep | ≤15 findings | 3 |
+| `xhigh` | 11 angles × 8 candidates → pool → 1-vote verify → sweep | ≤15 findings | 3 |
 | `max` | same fan-out as xhigh, run at maximum reasoning effort | ≤15 findings | 3 |
 | `ultra` | max fan-out + loop-until-dry + 3-vote adversarial verify | ≤25 findings | 5 |
 
@@ -71,7 +71,7 @@ Pick the execution path in this order:
    focus on, things to skip), append them to the args string.
    The workflow runs in the background; findings arrive as a task notification.
 3. **`Agent` tool available, no `Workflow`** → run the inline multi-agent
-   fan-out: **one finder subagent per angle** (10 at xhigh/max/ultra, 8 at
+   fan-out: **one finder subagent per angle** (11 at xhigh/max/ultra, 8 at
    medium/high), then pool the candidates, then verifier subagents, then sweep.
    Both paths run the identical fan-out — one agent per correctness angle and one
    per cleanup lens.
@@ -275,8 +275,18 @@ typecheck, lint or test to turn a suspicion into evidence. Fence it: use the
 repo's own package manager and scripts (read `package.json` / the lockfile —
 never `npx`), scope the command as narrowly as the tool allows, time-box to
 ~5 minutes, and on slowness or unrelated failure note it and move on. Never
-block. Never modify files, install packages, or change git state — the review
-is read-only until `--fix`.
+block.
+
+**And tell them to prefer evidence to reasoning.** A reviewer that can extract
+the suspect function into a scratch file and run it with the breaking input
+returns a decision; one that only reads returns a maybe. Say so explicitly in
+every finder and verifier prompt, and give them somewhere to put the scripts:
+a temp directory (`$TMPDIR`, `/tmp`), **never the repository**. Without the
+carve-out "never modify files" reads as "never write a script", and the fleet
+argues instead of executing.
+
+Never modify files in the repository, install packages, or change git state —
+the review is read-only until `--fix`.
 
 ## Phase 1 — Find candidates
 
@@ -286,10 +296,10 @@ Read `references/angles.md` for the verbatim angle texts.
 |---|---|---|---|
 | `medium` | A, B, C | Reuse, Simplification, Efficiency, Altitude, Conventions | 6 |
 | `high` | A, B, C | same 5 | 6 |
-| `xhigh` / `max` | A, B, C, D, E | same 5 | 8 |
-| `ultra` | A, B, C, D, E | same 5 | 8, repeated until dry |
+| `xhigh` / `max` | A, B, C, D, E, F | same 5 | 8 |
+| `ultra` | A, B, C, D, E, F | same 5 | 8, repeated until dry |
 
-**Each angle gets its own subagent on both paths** — 8 at medium/high, 10 at
+**Each angle gets its own subagent on both paths** — 8 at medium/high, 11 at
 xhigh/max/ultra. Cleanup lenses are not merged into one agent: a single agent
 asked to cover five lenses covers the first two and skims the rest, and its
 output arrives as one undifferentiated block that competes for report slots as a
@@ -340,6 +350,16 @@ defect is a fact about the code, not about the wording.
    an unsettled contradiction becomes either a false finding in the report or a
    real bug dropped from it, and nobody downstream will notice it unless the
    pooling pass says so.
+4. **Put the out-of-repo claims in one batch and name where to look.** Some
+   candidates don't bottom out in the diff at all: they turn on what a framework,
+   harness, tool schema, installed binary or third-party library actually does.
+   Batch those **together regardless of which files they cite** — one
+   investigation settles all of them — and tell the verifier where the evidence
+   lives: the installed package or binary path, the lockfile entry, the vendored
+   source, a prior run's log or record. Scattered across themed batches and left
+   unnamed, each verifier separately concludes "that runtime isn't in this repo"
+   and returns PLAUSIBLE, and the review ships open questions instead of
+   decisions. This is the single largest source of unresolved verdicts.
 
 **Never drop a candidate here, and never judge one.** If you can't tell whether
 two things are one defect, keep them separate — an extra verifier is cheap, a lost
@@ -363,6 +383,18 @@ Read `references/verify.md` for the ladders and the per-level voting rules.
   what goes wrong, confirm it and say which one was right.
 - On a contradiction: do not average, do not hedge, do not return PLAUSIBLE for
   both sides. Decide which reading the code supports and quote the deciding line.
+- **"It depends on the runtime" is a research task, not a verdict.** When a claim
+  turns on something outside the diff — a framework, the harness, a tool schema,
+  an installed binary, a third-party library — the verifier goes and finds out:
+  reads the installed package or vendored source, greps the binary for the schema
+  or enum, checks what the *lockfile's* version does, executes the path, or digs
+  up an artifact of a real previous run. PLAUSIBLE is for "I tried and the
+  evidence isn't obtainable", and it must say what was tried.
+- **Every non-refuted candidate gets a severity** — high / medium / low, the size
+  of the consequence times the reachability of the trigger. The verifier is the
+  only agent that both read the code and judged the claim, so this is the only
+  severity score in the pipeline grounded in evidence rather than in the wording
+  of a summary. It seeds the ranking and decides what the cap cuts.
 - Evidence must quote or cite the relevant line(s).
 - Keep **CONFIRMED and PLAUSIBLE**. Drop REFUTED.
 - At `xhigh`/`max`: this is recall mode — a single non-REFUTED vote carries the
@@ -438,6 +470,16 @@ not the verdict alone, and not the order the findings arrived in.
   fails loudly: a crash gets noticed, a wrong number gets shipped.
 - Correctness outranks cleanup. Within cleanup, rank by the cost actually
   incurred, not by how many lines are involved.
+- Each finding carries the **severity its verifier scored**. That is one input,
+  not a ruling — the verifier saw one subsystem and you have the whole repo — so
+  overrule it where the code says otherwise, but overrule it deliberately.
+
+**Record the reasoning.** Give every kept finding a one-or-two-sentence
+rationale: why it ranks where it does, and — when you merged anything into it —
+what you checked in the code to conclude those are one root cause. It is the only
+surviving record of how the report got its shape; without it the report is an
+ordered list nobody can audit, and the next run repeats the same judgement calls
+from scratch.
 
 **Apply both budgets:** the level's cap, and the cleanup slots reserved from it
 (see *Effort levels*). Spend the reserved slots on the cleanup findings with the

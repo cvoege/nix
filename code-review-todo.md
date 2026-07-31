@@ -4,9 +4,14 @@ Read both, plus `references/angles.md`, `verify.md`, and the slash command. This
 
 **Test integrity (correctness angle F).** Nothing in the roster looks at tests as a subject. `Output` even lists `test-coverage` as a category, but no angle produces it. The sweep gets one clause about setup/teardown asymmetry, and `low` explicitly skips test hunks. The angle: does new behavior have a test; does a changed test still assert what its name claims; did an assertion get weakened to make it pass; is a test vacuous (mock returns the value under assertion, `assert` inside a never-entered branch); was a test deleted alongside the code path it covered (Angle B covers the deletion, nobody covers the *weakening*).
 
-**Untrusted-input tracer.** Your design note deliberately rejects a security reviewer, and I'd keep that. But there's a hole: injection appears only as three words inside Angle D. As a *trace* lens it partitions correctly — start at each new input the diff introduces (request field, env var, filename, LLM output, third-party response) and follow it to every sink (shell, SQL, file path, HTML, log, auth decision). Same shape as Angle C, different starting set. Catches secrets-in-logs and missing authz on a new endpoint without becoming a topic fleet.
+**Untrusted-input tracer.** — **DONE**: shipped as Angle F, xhigh/max/ultra only (`CORRECTNESS_ANGLES` in the workflow, `references/angles.md`). Your design note deliberately rejects a security reviewer, and I'd keep that. But there's a hole: injection appears only as three words inside Angle D. As a *trace* lens it partitions correctly — start at each new input the diff introduces (request field, env var, filename, LLM output, third-party response) and follow it to every sink (shell, SQL, file path, HTML, log, auth decision). Same shape as Angle C, different starting set. Catches secrets-in-logs and missing authz on a new endpoint without becoming a topic fleet.
 
-## 2. Severity as a first-class field
+## 2. Severity as a first-class field — **DONE**
+
+Shipped on `BATCH_VERDICT_SCHEMA` rather than `CANDIDATES_SCHEMA`: the verifier
+scores `severity: high|medium|low`, since it is the only agent that both read
+the code and judged the claim, and `rank()` is now
+`(kind, severity, verdict)`. Original note follows.
 
 Findings carry `verdict` (confidence) and `category` (angle), but not impact. `rank()` in the workflow is `cleanup*2 + plausible*1`, so within correctness the only ordering signal is CONFIRMED-vs-PLAUSIBLE — a CONFIRMED cosmetic bug sorts above a PLAUSIBLE data-loss bug. The synthesizer is told "most-severe first" and can fix this, but the backfill loop at `colton-code-review.js:683` walks `ranked` order, which is severity-blind, and that's exactly the path that fills the cap when synthesis is skipped or partial. I'd add `impact: 'high'|'medium'|'low'` to `CANDIDATES_SCHEMA` (finder proposes, verifier can revise) and make `rank` `(kind, impact, verdict)`.
 
