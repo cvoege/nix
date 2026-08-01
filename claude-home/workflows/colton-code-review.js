@@ -1,7 +1,7 @@
 export const meta = {
   name: 'colton-code-review',
   description: 'Workflow-backed code review — one finder per correctness angle and per cleanup lens, a semantic pool/dedup pass, theme-batched independent verifiers, a coverage-driven sweep, then a code-reading synthesizer that merges by root cause and ranks by severity.',
-  whenToUse: 'Launched by the cv-code-review skill at high, xhigh, max, or ultra effort. Pass args as "<level> [target]" — level is high, xhigh, max, or ultra; target is an optional PR number, branch, ref range, path, or free-form review instructions (e.g. "only review src/foo.ts", "focus on error handling").',
+  whenToUse: 'Launched by the cv-code-review skill at medium, high, xhigh, max, or ultra effort. Pass args as "<level> [target]" — level is medium, high, xhigh, max, or ultra (`low` is a two-turn inline pass, not a fan-out, and this workflow refuses it); target is an optional PR number, branch, ref range, path, or free-form review instructions (e.g. "only review src/foo.ts", "focus on error handling").',
   phases: [
     { title: 'Scope', detail: 'Materialize the diff, pin changed files, conventions, stated intent and the unchanged files the change drives' },
     { title: 'Specialize', detail: 'Turn each generic angle into concrete hypotheses about this diff — sharded across the angle roster' },
@@ -35,10 +35,11 @@ export const meta = {
 // Effort parameterization mirrors the inline cv-code-review cells: one finder
 // per correctness angle AND one per cleanup lens, so the workflow path and the
 // inline path now run the identical fan-out.
-//   high  → 3 correctness + 5 cleanup (8 agents, ≤48 cands) → ≤10 findings
-//   xhigh → 6 correctness + 5 cleanup (11 agents, ≤88 cands) → sweep → ≤15 findings
-//   max   → same structure as xhigh (the reasoning effort differs, not the fan-out)
-//   ultra → same fan-out, 3-vote adversarial verify, sweep loops until dry → ≤25 findings
+//   medium → 3 correctness + 2 cleanup (5 agents, ≤25 cands) → ≤8 findings
+//   high   → 3 correctness + 5 cleanup (8 agents, ≤48 cands) → ≤10 findings
+//   xhigh  → 6 correctness + 5 cleanup (11 agents, ≤88 cands) → sweep → ≤15 findings
+//   max    → same structure as xhigh (the reasoning effort differs, not the fan-out)
+//   ultra  → same fan-out, 3-vote adversarial verify, sweep loops until dry → ≤25 findings
 //
 // cleanupSlots reserves report slots for cleanup findings. Without it, cleanup
 // is a lens the review pays for and never publishes: correctness always
@@ -47,24 +48,47 @@ export const meta = {
 // reservation is soft in both directions (see the quota arithmetic in the
 // assembler): whichever class is short donates its unused share to the other,
 // so no slot is ever left empty to honour it.
+//
+// `medium` is the precision tier and it is tuned for WALL-CLOCK, not coverage.
+// The measured comparison it exists to close: the built-in /code-review at
+// medium is one agent, 29 tool calls and 6m19s; this workflow's first medium run
+// was 15 agents, 400 tool calls and 34 minutes for a report of the same size that
+// missed three defects the single agent found. So medium now runs half the
+// fan-out, caps each agent's tool budget (`budget`), batches verification wide
+// enough that Verify is one or two agents rather than a second full barrier
+// (`batchMax`), and asks finders to settle their own evidence before returning
+// (`foldVerify`). Recall is bought back at `high` and above, which are unchanged.
 const LEVEL_PARAMS = {
-  high:  { correctnessAngles: 3, perAngle: 6, maxFindings: 10, cleanupSlots: 2, sweep: false, sweepRounds: 0, votes: 1, effort: undefined },
-  xhigh: { correctnessAngles: 6, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'xhigh' },
-  max:   { correctnessAngles: 6, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'max' },
-  ultra: { correctnessAngles: 6, perAngle: 8, maxFindings: 25, cleanupSlots: 5, sweep: true,  sweepRounds: 6, votes: 3, effort: 'max' },
+  medium:{ correctnessAngles: 3, cleanupLenses: 2, perAngle: 5, maxFindings: 8,  cleanupSlots: 2, sweep: false, sweepRounds: 0, votes: 1, effort: 'medium',   batchMax: 10, specialize: false, foldVerify: true,  budget: { finderTools: 12, verifierTools: 16, minutes: 4 } },
+  high:  { correctnessAngles: 3, cleanupLenses: 5, perAngle: 6, maxFindings: 10, cleanupSlots: 2, sweep: false, sweepRounds: 0, votes: 1, effort: undefined, batchMax: 6,  specialize: true,  foldVerify: false, budget: null },
+  xhigh: { correctnessAngles: 6, cleanupLenses: 5, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'xhigh',   batchMax: 6,  specialize: true,  foldVerify: false, budget: null },
+  max:   { correctnessAngles: 6, cleanupLenses: 5, perAngle: 8, maxFindings: 15, cleanupSlots: 3, sweep: true,  sweepRounds: 1, votes: 1, effort: 'max',     batchMax: 6,  specialize: true,  foldVerify: false, budget: null },
+  ultra: { correctnessAngles: 6, cleanupLenses: 5, perAngle: 8, maxFindings: 25, cleanupSlots: 5, sweep: true,  sweepRounds: 6, votes: 3, effort: 'max',     batchMax: 6,  specialize: true,  foldVerify: false, budget: null },
 }
+// Levels this skill supports that are NOT a fan-out, so they are not keys of
+// LEVEL_PARAMS but must still parse as a level. Without this, `low` fails the
+// own-property check, LEVEL silently becomes `high`, and the word "low" is
+// injected into every agent prompt as the review target — the exact defect a
+// prior run of this review found against `medium` and reproduced live.
+const NON_WORKFLOW_LEVELS = new Set(['low'])
 const SWEEP_MAX = 8
 // Worst first. The verifier scores each defect; the ordering here is what the
 // fallback rank and the backfill loop walk.
 const SEVERITIES = ['high', 'medium', 'low']
 // ultra stops after this many consecutive sweeps that surface nothing new.
 const DRY_ROUNDS_TO_STOP = 2
-// Defects per verifier agent. Small enough that the verifier can read the code
-// for every one of them, large enough to amortize the diff read and to let one
-// agent cross-check related claims against each other. Raised from 4 after a
-// measured run verified 52 distinct defects to fill a 15-slot report: the tail
-// of that list is where the agent count goes, and related claims are cheaper to
-// judge together than to spawn separately for.
+// Defects per verifier agent, and the default when a level does not set its own
+// `batchMax`. Small enough that the verifier can read the code for every one of
+// them, large enough to amortize the diff read and to let one agent cross-check
+// related claims against each other. Raised from 4 after a measured run verified
+// 52 distinct defects to fill a 15-slot report: the tail of that list is where
+// the agent count goes, and related claims are cheaper to judge together than to
+// spawn separately for.
+//   It is also the lever that decides whether Verify is a second barrier. A
+// measured medium run split 32 defects into 7 batches; the phase then took 13.2
+// minutes because one agent ran 2.17x the median and six others idled behind it,
+// for 56% parallel efficiency against Find's 83%. Widening the batch at medium
+// trades a little cross-checking depth for one or two agents instead of seven.
 const BATCH_MAX = 6
 // The gap sweep is split across this many agents, each owning a disjoint slice
 // of the sweep targets. One sweeper reading every target in series was the
@@ -86,11 +110,26 @@ const SPECIALIZE_SHARDS = 3
 
 const RAW_ARGS = (typeof args === 'string' ? args : '').trim()
 const FIRST = RAW_ARGS.split(/\s+/)[0] || ''
-// Own-property check so Object.prototype keys ("constructor", "toString") never parse as a level.
-const FIRST_IS_LEVEL = Object.prototype.hasOwnProperty.call(LEVEL_PARAMS, FIRST)
+// Own-property check so Object.prototype keys ("constructor", "toString") never
+// parse as a level. NON_WORKFLOW_LEVELS is consulted too: a level word this skill
+// documents must be consumed as a level even when this script cannot run it,
+// otherwise it survives into TARGET and every agent is told to narrow its review
+// to the word "low".
+const FIRST_IS_LEVEL = Object.prototype.hasOwnProperty.call(LEVEL_PARAMS, FIRST) || NON_WORKFLOW_LEVELS.has(FIRST)
 const LEVEL = FIRST_IS_LEVEL ? FIRST : 'high'
 const TARGET = FIRST_IS_LEVEL ? RAW_ARGS.slice(FIRST.length).trim() : RAW_ARGS
+if (NON_WORKFLOW_LEVELS.has(LEVEL)) {
+  return {
+    level: LEVEL,
+    target: TARGET || undefined,
+    error: '`' + LEVEL + '` is not a fan-out tier — it is a two-turn inline pass with no subagents (see "Low effort" in the cv-code-review skill). Run it in the session instead of launching this workflow.',
+    findings: [],
+  }
+}
 const P = LEVEL_PARAMS[LEVEL]
+const BUDGET = P.budget || null
+// Defects per verifier agent for THIS level; BATCH_MAX is the default.
+const BATCH_SIZE = Number.isInteger(P.batchMax) && P.batchMax > 0 ? P.batchMax : BATCH_MAX
 
 // Reasoning effort is the dominant term in a run's OUTPUT tokens, and output is
 // the expensive tier — cached input costs an order of magnitude less. So the
@@ -209,16 +248,15 @@ limit, no timeout on work an outsider controls.
 // share a single agent, which halved the fan-out the skill documents and made
 // every cleanup finding compete for slots against the correctness pool as one
 // undifferentiated block.
+//
+// THE ORDER IS A PRIORITY ORDER. Levels that run fewer lenses than there are
+// (medium takes `cleanupLenses: 2`) take a prefix of this list, so the first two
+// entries are the ones that have to earn a report slot on their own. Both of the
+// cleanup findings a measured medium run actually published came from
+// simplification and efficiency; reuse, altitude and conventions filled 3 of the
+// 5 agents that run and published nothing between them at that tier. Levels from
+// `high` up take all five, so reordering here changes nothing for them.
 const CLEANUP_ANGLES = [
-  {
-    label: 'cleanup-reuse',
-    text: `### Reuse
-
-Flag new code that re-implements something the codebase already has — Grep
-shared/utility modules and files adjacent to the change, and name the existing
-helper to call instead.
-`,
-  },
   {
     label: 'cleanup-simplification',
     text: `### Simplification
@@ -239,6 +277,15 @@ environments — they keep the entire enclosing scope alive for the object's
 lifetime (a memory leak when that scope holds large values); prefer a
 class/struct that copies only the fields it needs. Name the cheaper
 alternative.
+`,
+  },
+  {
+    label: 'cleanup-reuse',
+    text: `### Reuse
+
+Flag new code that re-implements something the codebase already has — Grep
+shared/utility modules and files adjacent to the change, and name the existing
+helper to call instead.
 `,
   },
   {
@@ -333,6 +380,53 @@ in the repository. One claim you executed beats three you argued for.
 
 Never modify files in the repository, install packages, or change git state —
 this is a read-only review.
+`
+
+// A hard per-agent budget, emitted only at levels that set one. It exists
+// because "time-box it to about 5 minutes" in TOOL_GUARDRAILS governs a single
+// typecheck/test command and nothing else: no clause anywhere bounded the AGENT.
+// In a measured medium run that gap cost the whole phase — the slowest verifier
+// ran 795 s against a 366 s median because it fuzzed an assembler 700,000 times
+// across two harnesses to settle whether one `if` branch was reachable, and the
+// answer it bought graded `low`. Six other verifiers idled behind it.
+//
+// The number is deliberately below what an agent would choose: the built-in
+// single-agent /code-review reviewed this same diff end to end in 29 tool calls
+// and returned nine findings, three of which this workflow's whole fan-out
+// missed. Depth per claim is not what recall is made of at this tier.
+const budgetBlock = (calls, role) => !BUDGET ? '' :
+  '## Your budget — this is a cap, not a target\n' +
+  'Spend at most **' + calls + ' tool calls** and about **' + BUDGET.minutes + ' minutes**. You are one of several agents behind a barrier: the phase does not finish until you do, so overrunning costs every other agent\'s wall-clock, not just your own.\n' +
+  'Budget them: read the diff and the files you need once, and spend what is left on the one or two claims that actually turn on evidence. When a claim would take more than a single executed check to settle, ' +
+  (role === 'verifier'
+    ? 'return PLAUSIBLE and name in your evidence exactly what would settle it. An honest PLAUSIBLE delivered inside the budget is worth more than a CONFIRMED that holds up six other agents.\n'
+    : 'surface the candidate anyway with what you have and say in the failure scenario what is still unsettled — an independent verifier judges it next, so an unfinished investigation is not a reason to withhold a candidate.\n') +
+  'If you are near the cap with work outstanding, return what you have. A partial result inside the budget beats a complete one outside it; nothing downstream can use an agent that has not returned.\n'
+
+// At `foldVerify` levels the verify phase is one or two agents rather than a
+// second full barrier, so the finder has to carry more of the evidentiary load
+// itself. This does not replace verification — it front-loads the cheap half of
+// it, so the narrow pass that follows spends its budget on the claims that are
+// still open instead of re-deriving every premise from scratch.
+const SELF_VERIFY = `## Settle your own evidence before you return
+
+Verification after this pass is deliberately narrow at this level, so a premise
+you assert and do not check is likely to reach the report unchecked. For every
+candidate you are about to surface, name to yourself the one factual claim it
+rests on — what some function returns, whether a guard exists, what a runtime
+actually does — and check that one claim against the source before you write it
+down. One executed check per candidate, not per hypothesis.
+
+Then say what you did: put the check and its result into the candidate's
+\`failure_scenario\` ("ran the assembler on two same-line defects: cut was empty,
+14 slots unused"). A candidate carrying its own executed evidence is one the
+verifier can confirm in a single read; one carrying only an argument costs the
+verifier the whole investigation over again, in a phase that no longer has room
+for it.
+
+This is not licence to withhold. A candidate whose premise you could not settle
+inside your budget still goes in — flag the premise as unchecked and let the
+verifier take it.
 `
 
 // Every fan-out phase passes `agentType`, so the role definitions in
@@ -520,7 +614,7 @@ const CRITIC_SCHEMA = {
 // finders' assignments and has to name them.
 const FINDERS = CORRECTNESS_ANGLES.slice(0, P.correctnessAngles)
   .map(a => ({ ...a, kind: 'correctness', cap: P.perAngle }))
-  .concat(CLEANUP_ANGLES.map(a => ({ ...a, kind: 'cleanup', cap: P.perAngle })))
+  .concat(CLEANUP_ANGLES.slice(0, P.cleanupLenses).map(a => ({ ...a, kind: 'cleanup', cap: P.perAngle })))
 
 // ─── Phase 0: Scope ───
 // Scope materializes the diff and pins the facts every later phase quotes.
@@ -698,15 +792,26 @@ const SCOPE_BLOCK =
 // the WHOLE roster and told which angles are not its own, so a lead that belongs
 // to another angle gets left to the shard writing that angle rather than
 // duplicated into three prompts.
+// Skipped entirely at levels with `specialize: false`. Specialization is a
+// barrier before Find and it is the most prompt-heavy phase in the run, which is
+// exactly the trade a precision tier should not take: it buys per-angle recall,
+// and recall is what `high` and above are for. The evidence against paying for it
+// at medium is direct — a measured medium run specialized all eight angles with
+// 3-8 hypotheses each and still missed three defects in the file every finder
+// read, all three of which a single unspecialized agent found by reading that
+// file top to bottom. Anchoring finders on hypotheses is not free; it also tells
+// them where NOT to look.
 phase('Specialize')
 const specializeShards = []
-{
+if (P.specialize) {
   const n = Math.max(1, Math.min(SPECIALIZE_SHARDS, FINDERS.length))
   const per = Math.ceil(FINDERS.length / n)
   for (let i = 0; i < n; i++) {
     const mine = FINDERS.slice(i * per, (i + 1) * per)
     if (mine.length > 0) specializeShards.push({ mine, i, n })
   }
+} else {
+  log('specialize: skipped at ' + LEVEL + ' — finders run their generic lens and pick their own leads')
 }
 
 const SPECIALIZE_PROMPT = shard =>
@@ -755,7 +860,9 @@ for (const out of specializeOuts) {
     leadsByLabel[a.label] = a
   }
 }
-log('specialize: leads for ' + Object.keys(leadsByLabel).length + '/' + FINDERS.length + ' angles from ' + specializeShards.length + ' shard(s)')
+if (specializeShards.length > 0) {
+  log('specialize: leads for ' + Object.keys(leadsByLabel).length + '/' + FINDERS.length + ' angles from ' + specializeShards.length + ' shard(s)')
+}
 
 // ─── Find (barrier) → Pool → Verify. The barrier is the deliberate trade for
 // cross-finder root-cause merge: pooling needs every finder's output.
@@ -778,7 +885,16 @@ const FINDER_PROMPT = f => {
     (readFiles.length > 0
       ? '## Files to open on disk\n\n' + readFiles.map(p => '- ' + p).join('\n') + '\n\n'
       : '') +
+    // No specialize phase ran, so nobody picked this angle's targets for it.
+    // Say so, rather than letting the finder infer from an absent section that
+    // a shallow diff-only pass is what was wanted.
+    (hyps.length === 0
+      ? '## Pick your own targets\n\n' +
+        'No prior pass wrote hypotheses for this angle — choosing where to look is part of your job, not an omission. Read the diff in full first, then open on disk the changed files with the most substance behind them (the largest, the ones other changed files depend on, the ones carrying control flow rather than prose) and read each top to bottom, not just its hunks. The defects a fan-out misses are usually the structural ones in the biggest changed file, which every reviewer opens and nobody reads through.\n\n'
+      : '') +
     TOOL_GUARDRAILS + '\n' +
+    (P.foldVerify ? SELF_VERIFY + '\n' : '') +
+    budgetBlock(BUDGET ? BUDGET.finderTools : 0, 'finder') + '\n' +
     'Surface up to ' + f.cap + ' candidate findings, each with file, line, a one-line summary, and a concrete failure_scenario — the user-visible consequence (error, wrong output, data loss), not an intermediate state (value stale, set grows). ' +
     'Pass every candidate with a nameable failure scenario through — do not silently drop half-believed candidates; an independent verifier judges them next. ' +
     'If nothing qualifies, return an empty list.\n\n' +
@@ -827,6 +943,7 @@ const BATCH_VERIFIER_PROMPT = (batch, lens) =>
       'These claims bottom out in something outside the diff, so re-reading the diff cannot settle them — go get the evidence named above. Returning PLAUSIBLE because "that runtime/library is not in this repo" is not a verdict; it is the investigation you were batched to do.\n\n'
     : '') +
   TOOL_GUARDRAILS + '\n' +
+  budgetBlock(BUDGET ? BUDGET.verifierTools : 0, 'verifier') + '\n' +
   'Read the diff, read the relevant file(s) in full — the whole enclosing function, not just the cited line — and return one verdict per candidate. ' +
   'Judge EACH candidate independently on its own claim. Reference each by its [i] index.\n\n' +
   '## Re-derive, do not inherit\n' +
@@ -875,8 +992,8 @@ function buildBatches(candidates, pool) {
   // it can actually read the code for.
   const out = []
   for (const b of raw) {
-    for (let i = 0; i < b.units.length; i += BATCH_MAX) {
-      out.push({ theme: b.theme, contradictions: b.contradictions, investigate: b.investigate, units: b.units.slice(i, i + BATCH_MAX) })
+    for (let i = 0; i < b.units.length; i += BATCH_SIZE) {
+      out.push({ theme: b.theme, contradictions: b.contradictions, investigate: b.investigate, units: b.units.slice(i, i + BATCH_SIZE) })
     }
   }
   return out
@@ -997,7 +1114,7 @@ if (allCandidates.length > 1) {
     '1. **Cluster by root cause.** Put every candidate that describes the SAME underlying defect into one cluster, best-described first (that one becomes the representative; the rest are recorded as duplicate locations on it). One candidate nobody else found is a cluster of one. Every index must appear in exactly one cluster.\n' +
     '   **The test, in both directions, is one edit.** Two candidates are one defect when a single fix resolves both — however differently they were worded, whatever line numbers or path spellings they used. They are different defects when they need separate edits, however much they share a theme, a subsystem, or one underlying misunderstanding. Two candidates at the same file:line can still be two defects; two candidates in different files can still be one.\n' +
     '   Apply it both ways, because both errors are expensive and they are not symmetrical in how they show up. A duplicate you split costs a verifier and puts one defect in the report twice. A distinct defect you merge is demoted to a duplicate *location* on somebody else\'s finding — it keeps no summary, no failure scenario and no verdict of its own, so it is never fixed, and nothing downstream can tell it was ever there.\n' +
-    '2. **Batch clusters by theme** — the mechanism or subsystem they are about, so one verifier reads that code once and judges every related claim against it. Aim for ' + BATCH_MAX + ' clusters per batch; smaller is fine, and a batch of one is fine for something that shares no theme with anything else. Larger batches get split automatically, so put related things together rather than balancing sizes.\n' +
+    '2. **Batch clusters by theme** — the mechanism or subsystem they are about, so one verifier reads that code once and judges every related claim against it. Aim for ' + BATCH_SIZE + ' clusters per batch; smaller is fine, and a batch of one is fine for something that shares no theme with anything else. Larger batches get split automatically, so put related things together rather than balancing sizes.\n' +
     '3. **Name the contradictions.** Where two candidates in a batch reach conflicting conclusions about the same code — one says a guard is missing that another says exists, two disagree on what a function returns, one refutes what another asserts — write that into the batch\'s `contradictions` field and say what the verifier must settle. This is the highest-value thing you produce: an unsettled contradiction becomes either a false finding in the report or a real bug dropped from it.\n' +
     '4. **Put the out-of-repo claims together and name where their evidence lives.** Some candidates do not bottom out in the diff at all: they turn on what a framework, harness, tool schema, installed binary or third-party library actually does. Batch those TOGETHER whatever files they cite — one investigation settles all of them — and write into that batch\'s `investigate` field where to go looking: the installed package or binary path, the lockfile entry, the vendored source tree, a prior run\'s log or record. Left scattered across themed batches and unnamed, every verifier separately concludes "that runtime is not in this repo" and returns PLAUSIBLE, and the review ships open questions instead of decisions. This is the single largest source of unresolved verdicts.\n\n' +
     'Do NOT judge whether any candidate is real, and do NOT drop one. Verification comes next and it is not your job. A candidate you leave out of every cluster still gets verified — just without the benefit of your grouping.\n\nStructured output only.',
@@ -1161,6 +1278,7 @@ const runSweepRound = async (round, shards, cap) => {
       '## Already ruled out (do NOT re-raise these — they were investigated and killed)\n' + ruledOutBlock() + '\n\n' +
       coverageBlock(shard) + '\n' +
       TOOL_GUARDRAILS + '\n' +
+      budgetBlock(BUDGET ? BUDGET.finderTools : 0, 'finder') + '\n' +
       'Re-read the diff and the enclosing functions looking ONLY for defects not already listed. ' +
       'Start with the files above, then go after what the first pass tends to miss: ' + SWEEP_GAP_FOCUS + '\n\n' +
       (round > 0 ? 'This is sweep round ' + (round + 1) + '. Earlier sweeps already covered the obvious gaps — go after what a reader who has read the diff three times would still miss.\n\n' : '') +

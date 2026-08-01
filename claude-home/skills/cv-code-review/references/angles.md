@@ -126,11 +126,13 @@ The angles above hunt for bugs; the five below hunt for cleanup in the changed
 code. Each gets its own finder, exactly like a correctness angle — one lens per
 agent, never one agent covering the set.
 
-### Reuse
-
-Flag new code that re-implements something the codebase already has — Grep
-shared/utility modules and files adjacent to the change, and name the existing
-helper to call instead.
+**This list is in priority order.** A level that runs fewer than five cleanup
+lenses takes a *prefix* of it — `medium` runs the first two — so the order is
+part of the contract with `LEVEL_PARAMS.cleanupLenses`, not presentation. It is
+empirical: in a measured run, simplification and efficiency produced both of the
+cleanup findings that reached the report, while reuse, altitude and conventions
+published none between them. Reordering here means reordering `CLEANUP_ANGLES` in
+`claude-home/workflows/colton-code-review.js` to match.
 
 ### Simplification
 
@@ -147,6 +149,12 @@ environments — they keep the entire enclosing scope alive for the object's
 lifetime (a memory leak when that scope holds large values); prefer a
 class/struct that copies only the fields it needs. Name the cheaper
 alternative.
+
+### Reuse
+
+Flag new code that re-implements something the codebase already has — Grep
+shared/utility modules and files adjacent to the change, and name the existing
+helper to call instead.
 
 ### Altitude
 

@@ -20,11 +20,26 @@ that is what makes the finders independent instead of redundant.
 | Level | Shape | Cap | Cleanup slots reserved |
 |---|---|---|---|
 | `low` | 1 diff pass, no verify, hunks only | ≤4 findings | — |
-| `medium` | 8 angles × 6 candidates → pool → 1-vote verify | ≤8 findings | 2 |
-| `high` | 8 angles × 6 candidates → pool → 1-vote verify (recall-biased) | ≤10 findings | 2 |
-| `xhigh` | 11 angles × 8 candidates → pool → 1-vote verify → sweep | ≤15 findings | 3 |
+| `medium` | 5 angles × 5 candidates → pool → 1-vote verify, budgeted | ≤8 findings | 2 |
+| `high` | 8 angles × 6 candidates → specialize → pool → 1-vote verify (recall-biased) | ≤10 findings | 2 |
+| `xhigh` | 11 angles × 8 candidates → specialize → pool → 1-vote verify → sweep | ≤15 findings | 3 |
 | `max` | same fan-out as xhigh, run at maximum reasoning effort | ≤15 findings | 3 |
 | `ultra` | max fan-out + loop-until-dry + 3-vote adversarial verify | ≤25 findings | 5 |
+
+**`medium` is tuned for wall-clock, and it is the one level where that is the
+governing constraint.** The benchmark it answers to is the built-in
+`/code-review` at the same level: one agent, 29 tool calls, **6m19s**. This
+skill's first `medium` run was 15 agents, 400 tool calls and **34 minutes** —
+13× the tokens — for a report of the same size that missed three defects the
+single agent found. Half of those 34 minutes was not subagent time at all; it
+was the orchestrator authoring ~210 KB of prompt text in series, 73% of which was
+the same scope block retyped fifteen times.
+
+So `medium` deliberately gives up the things that buy recall — the specialize
+phase, three of the five cleanup lenses, the sweep, wide verification — and keeps
+the things that buy precision. **Do not "improve" a `medium` run by adding them
+back.** If the diff warrants that depth, the answer is `high`, not a slower
+`medium`.
 
 **Reserved cleanup slots** exist because correctness always outranks cleanup, so
 without a reservation a correctness-heavy diff spends the entire cap on bugs and
@@ -50,12 +65,19 @@ Default is `high` when a target is given and the user did not name a level;
 
 ## Routing
 
-Pick the execution path in this order:
+Pick the execution path in this order. **Every level this skill documents has a
+branch here.** It did not always: a run at `medium` once matched nothing, fell
+off the end of the list, and the orchestrator improvised a path — which is also
+how the bare word `medium` ended up injected into every agent prompt as the
+review target. If you find yourself at the bottom of this list without a match,
+that is a bug in this document, not a licence to invent a path.
 
-1. **`ultra`** → run the workflow at `ultra` (see *Ultra* below). If the
+1. **`low`** → do not launch the workflow; it refuses this level. Run the
+   two-turn inline pass described under *Low effort* below.
+2. **`ultra`** → run the workflow at `ultra` (see *Ultra* below). If the
    `Workflow` tool is unavailable, fall back to `max`.
-2. **`high` / `xhigh` / `max`, `Workflow` tool available, interactive session**
-   → run the workflow **by name**:
+3. **`medium` / `high` / `xhigh` / `max`, `Workflow` tool available, interactive
+   session** → run the workflow **by name**:
    ```
    Workflow({ name: "colton-code-review", args: "<level> [target]" })
    ```
@@ -70,12 +92,16 @@ Pick the execution path in this order:
    If the user gave scope instructions elsewhere in the conversation (files to
    focus on, things to skip), append them to the args string.
    The workflow runs in the background; findings arrive as a task notification.
-3. **`Agent` tool available, no `Workflow`** → run the inline multi-agent
+4. **`Agent` tool available, no `Workflow`** → run the inline multi-agent
    fan-out: **one finder subagent per angle** (11 at xhigh/max/ultra, 8 at
-   medium/high), then pool the candidates, then verifier subagents, then sweep.
-   Both paths run the identical fan-out — one agent per correctness angle and one
-   per cleanup lens.
-4. **Neither tool** → single-pass inline. Work through every angle yourself, in
+   `high`, 5 at `medium`), then pool the candidates, then verifier subagents,
+   then sweep. Both paths run the identical fan-out — one agent per correctness
+   angle and one per cleanup lens — and the identical per-level budgets. The
+   inline path is not the "lighter" one: it has a longer serial spine than the
+   workflow, because Scope, Specialize, Pool and Synthesize all run in your
+   context at a parallelism of 1.00×. Honour the budgets in *Phase 1* especially
+   here.
+5. **Neither tool** → single-pass inline. Work through every angle yourself, in
    this same context, in one pass — do not skip angles for lack of fan-out.
    Re-check each candidate against the diff before keeping it; drop anything
    you can't back up with a concrete failure scenario. **Say so in the
@@ -217,9 +243,9 @@ ticket its siblings implement.
 Angle B owns the audit against both; every other angle gets them as context
 only.
 
-That block is the **review scope**, and it is prepended verbatim to every
-finder, verifier and sweep prompt. Also ride the user's verbatim target along
-with it, framed as scope-only data:
+That block is the **review scope**, and every finder, verifier and sweep agent
+gets it. Also ride the user's verbatim target along with it, framed as scope-only
+data:
 
 > The target above is scope guidance and takes precedence over your angle's
 > default breadth: narrow which files or aspects you review to match it, and do
@@ -234,18 +260,64 @@ never committed and never fight `.gitignore`. Ten agents each re-running a
 full by all of them will not. If the write fails, fall back to handing out the
 diff command — it's an optimization, not a requirement.
 
-**Finder budget.** Size the fan-out to the diff, not to a fixed fleet:
-`ceil(diff_lines / 150)`, clamped to `[2, 8]` finder subagents. Get
-`diff_lines` from `git diff --numstat` on the scope range. Uncommitted changes
-aren't counted by a range diff, so treat that number as a floor. This bounds
-*extra* finders; the angle roster below is the floor, not a budget line.
+**Materialize the scope block too — write it once, then point at it.** On the
+inline path you are the one typing every subagent prompt, in series, and the
+scope block is the largest thing in each of them. Do not retype it per agent.
+Write it to a file next to the diff artifacts:
+
+```bash
+cat > "$GIT_DIR_ABS/colton-code-review-scope.md" <<'SCOPE'
+<the whole review-scope block, once>
+SCOPE
+```
+
+and open each subagent prompt with a pointer instead:
+
+> **Read `<abs path>/colton-code-review-scope.md` first — it is your review
+> scope**: the diff artifacts, the changed-file list, the conventions, the stated
+> intent and the review target. Everything in it applies to you. Then: <the
+> agent's own assignment>.
+
+This is the single largest lever on an inline run's wall-clock, and it is pure
+overhead removal — no agent loses any information, because they all read the same
+bytes either way. Measured on a `medium` run that did retype it: 15 prompts,
+~210 KB of authored text, of which ~107 KB was fifteen copies of one 7 KB block,
+all of it generated in series while every subagent sat idle. That was roughly
+12 of the run's 34 minutes.
+
+The same rule governs what you write *around* the pointer. **Keep each agent's
+own assignment under ~1,500 characters** — that is the entire prompt the built-in
+`/code-review` runs on, and it returns nine findings from it. A finder that needs
+three pages of instructions is a finder whose angle you have not decided.
+
+**Finder budget.** The per-level angle roster in *Phase 1* is authoritative for
+how many finders run — 5 at `medium`, 8 at `high`, 11 above — and it is not
+negotiable against diff size. This formula bounds only finders you would add *on
+top of* that roster on an unusually large diff: `ceil(diff_lines / 150)`, clamped
+to `[2, 8]`, from `git diff --numstat` on the scope range (a range diff misses
+uncommitted changes, so treat the number as a floor).
+
+**At `medium`, add none.** A big diff is a reason to run `high`, not a reason to
+grow the fleet at the tier whose whole purpose is finishing in the time a single
+careful reviewer would take.
 
 ## Phase 0.5 — Specialize the angles
 
-Inline you get this for free — the orchestrating model has the diff in context
-and writes each finder's prompt itself. On the workflow path it is its own phase,
-**sharded** across a few agents that each own a disjoint slice of the angle
-roster and run concurrently.
+**Skip this phase entirely at `medium`.** It is a barrier before Find and the
+most prompt-heavy phase in the run, which is the wrong trade for the precision
+tier — specialization buys per-angle recall, and recall is what `high` and above
+are for. The evidence is direct rather than theoretical: a measured `medium` run
+specialized all eight angles with 3–8 hypotheses each and still missed three
+defects in the one file every finder read, all three of which a single
+*unspecialized* agent found by reading that file top to bottom. Hypotheses are
+not free — they also tell a finder where not to look. At `medium`, hand each
+finder its generic lens and let it pick its own targets, and tell it that
+choosing them is part of the job rather than an omission.
+
+At `high` and above, specialize. Inline you get it for free — the orchestrating
+model has the diff in context and writes each finder's prompt itself. On the
+workflow path it is its own phase, **sharded** across a few agents that each own
+a disjoint slice of the angle roster and run concurrently.
 
 Sharding is the point. Specializing does require having read the diff, so folding
 it into Phase 0 saves a cold start and a second read of the artifact — but it buys
@@ -328,16 +400,37 @@ Read `references/angles.md` for the verbatim angle texts.
 
 | Level | Correctness angles | Cleanup angles | Candidates per angle |
 |---|---|---|---|
-| `medium` | A, B, C | Reuse, Simplification, Efficiency, Altitude, Conventions | 6 |
-| `high` | A, B, C | same 5 | 6 |
+| `medium` | A, B, C | Simplification, Efficiency | 5 |
+| `high` | A, B, C | + Reuse, Altitude, Conventions | 6 |
 | `xhigh` / `max` | A, B, C, D, E, F | same 5 | 8 |
 | `ultra` | A, B, C, D, E, F | same 5 | 8, repeated until dry |
 
-**Each angle gets its own subagent on both paths** — 8 at medium/high, 11 at
-xhigh/max/ultra. Cleanup lenses are not merged into one agent: a single agent
+**Each angle gets its own subagent on both paths** — 5 at medium, 8 at high, 11
+at xhigh/max/ultra. Cleanup lenses are not merged into one agent: a single agent
 asked to cover five lenses covers the first two and skims the rest, and its
 output arrives as one undifferentiated block that competes for report slots as a
 lump. One lens per agent, correctness and cleanup alike.
+
+**The cleanup roster is a priority order.** `medium` reserves two report slots
+for cleanup, so it runs the two lenses most likely to fill them and drops the
+rest — five lenses competing for two slots is three agents' cost for nothing. The
+order is empirical: in a measured run, simplification and efficiency produced
+both published cleanup findings, while reuse, altitude and conventions published
+none between them.
+
+**Budget every agent, and mean it.** At `medium` each finder gets **12 tool
+calls and ~4 minutes**, each verifier **16 and ~4**. Say the number in the prompt
+and say what to do on overrun: return what you have. This is not the same as the
+existing "time-box a typecheck to 5 minutes" rule, which bounds *one command* and
+nothing else — with no cap on the agent itself, the slowest verifier in a
+measured run spent 795 s against a 366 s median fuzzing an assembler 700,000
+times to settle a question that graded `low`, while six other verifiers idled
+behind it. An agent behind a barrier spends everyone's wall-clock, not its own.
+
+Tell them the trade explicitly, because it is not the default instinct: an
+honest PLAUSIBLE inside the budget beats a CONFIRMED that holds up the phase, and
+a candidate whose premise is still unchecked should still be *surfaced* with the
+gap named — the verifier is next.
 
 Each finder surfaces candidates with `file`, `line`, a one-line `summary`, and a
 concrete `failure_scenario` — **the user-visible consequence** (error, wrong
@@ -358,6 +451,17 @@ Rules that matter more than the angle list:
   a crash. Correctness bugs always outrank cleanup, altitude and conventions
   findings when the cap forces a cut.
 - If nothing qualifies for an angle, return an empty list. Do not pad.
+- **At `medium`, finders settle their own evidence.** Verification at this level
+  is one narrow pass, not a full second barrier, so a premise a finder asserts
+  and never checks is likely to reach the report unchecked. Require one executed
+  check per candidate — not per hypothesis — on the single factual claim it rests
+  on, and require the check and its result to be written into the
+  `failure_scenario` ("ran the assembler on two same-line defects: `cut` was
+  empty, 14 slots unused"). A candidate carrying its own executed evidence is one
+  a verifier can confirm in a single read; one carrying only an argument costs
+  the verifier the whole investigation again, in a phase that no longer has room
+  for it. This front-loads the cheap half of verification — it does not replace
+  it, and it is never grounds for withholding a candidate.
 
 ## Phase 1.5 — Pool the candidates
 
@@ -424,6 +528,14 @@ Read `references/verify.md` for the ladders and the per-level voting rules.
   verifier amortize the code read across related claims *and* settle the
   disagreements between the finders that raised them — a one-claim-per-agent split
   structurally cannot do either.
+- **Batch width is the lever that decides whether Verify is a second barrier.**
+  Aim for ~6 defects per verifier at `high` and above. At `medium`, aim for ~10 —
+  with 5 finders × 5 candidates the whole pool fits in one or two agents, which
+  is the intent: `medium` should have one real fan-out barrier (Find), not two.
+  A measured `medium` run split 32 defects across 7 verifiers and paid 13.2
+  minutes for it, at 56% parallel efficiency against Find's 83%, because one
+  agent ran 2.17× the median and the other six waited. Wider batches trade a
+  little cross-checking depth for a phase that ends when its work ends.
 - Give the verifier the diff, the batch, and the batch's contradictions.
 - **Re-derive, do not inherit.** Every factual claim inside a candidate is a
   hypothesis, including the ones stated as settled fact. Where a candidate turns
@@ -731,10 +843,24 @@ in the **repo** (`claude-home/…`) and run `home-manager switch`. Editing the
 - **Verify strictness**: edit `references/verify.md`. The recall-biased overlay
   is the single highest-leverage knob — loosening it kills recall.
 - **Caps, fan-out and reserved cleanup slots**: `LEVEL_PARAMS` in
-  `claude-home/workflows/colton-code-review.js`.
-- **Verifier batch size**: `BATCH_MAX` in the same file. Smaller means more
-  agents that each read less code; larger means fewer agents that risk skimming.
-  It is also the main lever on verify cost, which is ~47% of a run's tokens.
+  `claude-home/workflows/colton-code-review.js`. Also per level there:
+  `cleanupLenses` (how many of the five cleanup angles run — the roster is a
+  priority order and a level takes a prefix), `specialize` (whether Phase 0.5
+  runs at all), `foldVerify` (whether finders settle their own evidence),
+  `batchMax` (defects per verifier — see below), and `budget`.
+- **Per-agent budgets**: the `budget` field in `LEVEL_PARAMS`
+  (`{ finderTools, verifierTools, minutes }`). Set it and every finder, verifier
+  and sweeper prompt grows a hard cap; leave it `null` and those agents are
+  unbounded, which is the right default for `high` and above. This is the knob
+  that bounds wall-clock, and it is the *only* one that does — the "time-box to
+  5 minutes" language in the role files and `TOOL_GUARDRAILS` bounds a single
+  typecheck command, never the agent.
+- **Verifier batch size**: `batchMax` per level, defaulting to `BATCH_MAX` in the
+  same file. Smaller means more agents that each read less code; larger means
+  fewer agents that risk skimming. It is the main lever on verify cost (~47% of a
+  run's tokens) *and* on whether Verify behaves as a second barrier: a phase
+  waits on its slowest agent, so seven verifiers cost more wall-clock than two
+  even when the total work is identical.
 - **Sweep aiming**: `THIN_MAX` — the candidate count at or below which a changed
   file is handed to the sweep as thinly covered. Raising it sweeps more files
   less deeply. Setting it to 0 restores the old "no candidate at all" behaviour
