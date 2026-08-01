@@ -107,9 +107,9 @@ in
     ".claude/skills" = { source = ./claude-home/skills; recursive = true; };
     ".claude/workflows" = { source = ./claude-home/workflows; recursive = true; };
     ".claude/settings-base.json" = { source = ./claude-home/settings-base.json; };
-    ".claude/CLAUDE.md" = { source = ./claude-home/CLAUDE.md; };
-    ".pi/agent/AGENTS.md" = { source = ./claude-home/CLAUDE.md; };
-    ".config/opencode/AGENTS.md" = { source = ./claude-home/CLAUDE.md; };
+    ".claude/CLAUDE.md" = { source = ./agent-shared/AGENTS.md; };
+    ".pi/agent/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
+    ".config/opencode/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
@@ -351,6 +351,10 @@ in
         repo_root="$(git rev-parse --show-toplevel)" || return 1
         worktree_root="$(realpath "$repo_root/../$(basename "$repo_root")-worktrees")"
         for worktree in $(git worktree list | awk '{print $1}' | grep "$worktree_root") ; do git worktree remove "$worktree" ; done
+      }
+
+      start_llama() {
+        llama-server   --models-dir ~/models   --no-models-autoload   --jinja   --host 127.0.0.1   --port 8080   -ngl 999
       }
     '';
   };
