@@ -1,11 +1,7 @@
-Write as much output as you can from this review (including output from the individual agents, organized in folders) to a folder called (name of the code review skill I had you run) in this repo. Write down meticulous notes not just on the findings but for each agent:
+I built my [@cv-code-review](file:///Users/colton/.config/home-manager/claude-home/skills/cv-code-review/) skill to be as much like the built in claude code code-review max command as possible. I ran both on this repo and asked both to take notes of everything they were doing. 
 
-1. What its original prompt was
-2. What it was asked to do
-3. What data it received from other agents
-4. What it found
-5. What it's thinking was
-6. What tools it ran
-7. It's results
+Those notes are in tmp/claude-code-review-max-notes for the claude code-review  
 
-You should also write down the findings in "findings.md" in that folder and add a stats.md with any relevant stats, including a detailed token use breakdown and time breakdown.
+and tmp/colton-code-review-deep-notes for my cv-code-review
+
+I want you to compare the two and the findings they made and the process they took to see how good of an emulation of the built in code-review skill mine is and evaluate any gaps.
