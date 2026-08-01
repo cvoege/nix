@@ -3,7 +3,7 @@ description: "Multi-angle code review at a tunable effort level. Usage: /colton-
 argument-hint: "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<target>]"
 ---
 
-Parse `$ARGUMENTS` yourself, then run the **max-code-review** skill with the
+Parse `$ARGUMENTS` yourself, then run the **cv-code-review** skill with the
 parsed values. Do not ask the user to confirm any of this — the arguments are
 the answer.
 
@@ -43,4 +43,4 @@ base — `git stack parent` when it names an existing branch (it exits 0 printin
 branch exists), otherwise `git stack trunk`. Include uncommitted changes either
 way.
 
-Now run the max-code-review skill end to end with those values.
+Now run the cv-code-review skill end to end with those values.

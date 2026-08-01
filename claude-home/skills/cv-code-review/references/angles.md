@@ -1,6 +1,6 @@
 # Review angles
 
-The finder angles used by `max-code-review`. These are the shared prompt
+The finder angles used by `cv-code-review`. These are the shared prompt
 fragments — every effort level draws from the same pool, it only varies how
 many angles run, how many candidates each may surface, and whether they run as
 subagents or inline.

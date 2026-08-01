@@ -1,5 +1,5 @@
 ---
-name: max-code-review
+name: cv-code-review
 description: Multi-angle, multi-agent code review of a diff, branch, PR, or file at a tunable effort level (low / medium / high / xhigh / max / ultra). Finder angles fan out in parallel, their candidates are pooled by root cause, independent verifiers vote CONFIRMED/PLAUSIBLE/REFUTED on each distinct defect, a fresh sweeper hunts the files coverage missed, then a code-reading synthesizer merges, ranks by severity and caps the report. Use whenever the user asks to "review my code/changes/branch/PR", "code review", "check this diff", asks for a "max review" or "ultra review", or invokes /colton-code-review.
 ---
 
@@ -636,7 +636,7 @@ Every file below is a nix-store symlink managed by `home.nix`, so edit the copy
 in the **repo** (`claude-home/…`) and run `home-manager switch`. Editing the
 `~/.claude/…` path directly fails with "Permission denied".
 
-- **Angles**: edit `claude-home/skills/max-code-review/references/angles.md` and
+- **Angles**: edit `claude-home/skills/cv-code-review/references/angles.md` and
   the matching constant in the workflow. Adding a correctness angle means bumping
   `correctnessAngles` in `LEVEL_PARAMS`; adding a cleanup lens means adding it to
   `CLEANUP_ANGLES` (the count is derived, not hardcoded).

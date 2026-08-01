@@ -1,7 +1,7 @@
 export const meta = {
   name: 'colton-code-review',
   description: 'Workflow-backed code review — one finder per correctness angle and per cleanup lens, a semantic pool/dedup pass, theme-batched independent verifiers, a coverage-driven sweep, then a code-reading synthesizer that merges by root cause and ranks by severity.',
-  whenToUse: 'Launched by the max-code-review skill at high, xhigh, max, or ultra effort. Pass args as "<level> [target]" — level is high, xhigh, max, or ultra; target is an optional PR number, branch, ref range, path, or free-form review instructions (e.g. "only review src/foo.ts", "focus on error handling").',
+  whenToUse: 'Launched by the cv-code-review skill at high, xhigh, max, or ultra effort. Pass args as "<level> [target]" — level is high, xhigh, max, or ultra; target is an optional PR number, branch, ref range, path, or free-form review instructions (e.g. "only review src/foo.ts", "focus on error handling").',
   phases: [
     { title: 'Scope', detail: 'Materialize the diff, pin changed files and conventions, and turn the diff into concrete per-angle hypotheses' },
     { title: 'Find', detail: 'One finder per correctness angle and per cleanup lens' },
@@ -31,7 +31,7 @@ export const meta = {
 // splits one defect described at two paths, and hands every verifier a single
 // isolated claim with no way to settle a disagreement between finders.
 //
-// Effort parameterization mirrors the inline max-code-review cells: one finder
+// Effort parameterization mirrors the inline cv-code-review cells: one finder
 // per correctness angle AND one per cleanup lens, so the workflow path and the
 // inline path now run the identical fan-out.
 //   high  → 3 correctness + 5 cleanup (8 agents, ≤48 cands) → ≤10 findings
