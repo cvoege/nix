@@ -1,6 +1,6 @@
 ---
 name: cv-code-review
-description: Multi-angle, multi-agent code review of a diff, branch, PR, or file at a tunable effort level (low / medium / high / xhigh / max / ultra). Finder angles fan out in parallel, their candidates are pooled by root cause, independent verifiers vote CONFIRMED/PLAUSIBLE/REFUTED on each distinct defect, a fresh sweeper hunts the files coverage missed, then a code-reading synthesizer merges, ranks by severity and caps the report. Use whenever the user asks to "review my code/changes/branch/PR", "code review", "check this diff", asks for a "max review" or "ultra review", or invokes /colton-code-review.
+description: An experimental code review skill. Do not run unless directly called.
 ---
 
 # Max Code Review
