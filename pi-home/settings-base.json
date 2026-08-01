@@ -1,0 +1,6 @@
+{
+  "lastChangelogVersion": "0.83.0",
+  "theme": "dark",
+  "defaultProvider": "llama.cpp",
+  "defaultModel": "ggml-org/Qwen3.6-27B-GGUF:Q4_K_M"
+}

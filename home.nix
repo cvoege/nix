@@ -109,6 +109,8 @@ in
     ".claude/settings-base.json" = { source = ./claude-home/settings-base.json; };
     ".claude/CLAUDE.md" = { source = ./agent-shared/AGENTS.md; };
     ".pi/agent/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
+    ".pi/agent/settings-base.json" = { source = ./pi-home/settings-base.json; };
+    ".pi/agent/skills" = { source = ./pi-home/skills; recursive = true; };
     ".config/opencode/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in

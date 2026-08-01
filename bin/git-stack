@@ -10,6 +10,12 @@
 #                                   stack: hide its stale review comments, post a fresh
 #                                   "@claude review once" (skips branches with no PR)
 #   git stack review single         same, but only the current branch (not the whole stack)
+#   git stack diff [<branch>]       diff a branch against its stack parent (or trunk),
+#                                   from the fork point so commits the parent gained
+#                                   since the branch last rebased are left out;
+#                                   --base prints just that fork-point commit,
+#                                   --dirty includes uncommitted changes, and any
+#                                   other args are forwarded to `git diff`
 #   git stack list                  print "<branch>\t<parent>" bottom->top (for scripts)
 #   git stack checkout              pick a branch in the current stack (or create a
 #                                   new one on the end) from an interactive selector
@@ -836,6 +842,144 @@ cmd_list() {
   done < <(stack_collect "$cur")
 }
 
+# ---- diff ----------------------------------------------------------------
+# Diff a branch against its stack parent (or the trunk, when no parent is
+# recorded) showing only the branch's own work.
+#
+# The diff starts at the branch's FORK POINT, not at the parent's current tip.
+# That's the whole point: when the parent (often trunk) has gained commits since
+# the branch last rebased, a plain `git diff parent branch` presents those
+# commits as part of this branch's change set — which misleads reviewers and
+# review tools. From the fork point, the diff is exactly "what this branch did".
+#
+# The fork point is the newest of these commits, all of which are ancestors of
+# the branch:
+#   * merge-base(parent, branch)         — the usual fork point
+#   * merge-base(origin/parent, branch)  — newer when the branch was rebased onto
+#                                          the remote parent but the local parent
+#                                          ref is stale
+#   * branch.<b>.stackForkBase           — pinned when the branch was reparented
+#                                          off a removed (e.g. squash-merged)
+#                                          parent, so that parent's commits stay
+#                                          out of the diff even before the new
+#                                          parent has the squash commit
+# Taking the newest yields the smallest range that still contains every one of
+# the branch's own commits.
+
+# Newest of the given commits: the one all others are ancestors of. Candidates
+# share the branch's ancestry, so they're normally totally ordered; if two are
+# incomparable (a merge in the branch), fall back to their merge base, which is
+# still an ancestor of both and so can only widen the diff, never truncate it.
+diff_newest_commit() { # commit... -> newest commit
+  local best="" c
+  for c in "$@"; do
+    [[ -n "$c" ]] || continue
+    if [[ -z "$best" ]]; then best="$c"
+    elif is_ancestor "$best" "$c"; then best="$c"
+    elif is_ancestor "$c" "$best"; then :
+    else best=$(git merge-base "$best" "$c")
+    fi
+  done
+  echo "$best"
+}
+
+diff_usage() {
+  cat >&2 <<'EOF'
+usage: git stack diff [<branch>] [--base] [--dirty] [<git diff args>…] [-- <path>…]
+
+Diffs <branch> (default: the current branch) against its stack parent, or the
+trunk when no parent is recorded. The diff starts at the fork point, so commits
+the parent gained since the branch last rebased are left out.
+
+  --base    print only the resolved fork-point commit, then exit
+  --dirty   include uncommitted working-tree changes (checked-out branch only)
+
+Every other argument is forwarded to `git diff`, e.g. --stat, --name-only,
+-M, -- <path>…
+EOF
+}
+
+cmd_diff() {
+  local branch="" base_only=0 dirty=0 in_paths=0
+  local -a opts=() paths=()
+  while [[ $# -gt 0 ]]; do
+    if [[ $in_paths -eq 1 ]]; then paths+=("$1"); shift; continue; fi
+    case "$1" in
+      --base|--base-only) base_only=1 ;;
+      --dirty)            dirty=1 ;;
+      -h|--help)          diff_usage; return 0 ;;
+      --)                 in_paths=1 ;;
+      -*)                 opts+=("$1") ;;
+      *)
+        # A lone positional naming a local branch selects the branch to diff;
+        # anything else is a pathspec for git diff.
+        if [[ -z "$branch" ]] && branch_exists "$1"; then branch="$1"
+        else paths+=("$1"); fi ;;
+    esac
+    shift
+  done
+
+  local cur trunk
+  cur=$(current_branch)
+  trunk=$(stack_trunk)
+  if [[ -z "$branch" ]]; then
+    branch="$cur"
+    [[ -n "$branch" ]] || die "detached HEAD; name a branch: git stack diff <branch>"
+  fi
+  [[ "$branch" != "$trunk" ]] || die "'$branch' is the trunk; there's nothing to diff it against."
+  [[ $dirty -eq 0 || "$branch" == "$cur" ]] \
+    || die "--dirty only works on the checked-out branch (you're on '${cur:-detached HEAD}')."
+
+  local parent; parent=$(stack_parent "$branch")
+  [[ -n "$parent" ]] || parent="$trunk"
+  [[ "$parent" != "$branch" ]] || die "'$branch' is recorded as its own parent."
+
+  local tip; tip=$(sha "$branch") || die "no such branch: '$branch'."
+
+  local -a bases=()
+  local mb fb
+  if branch_exists "$parent"; then
+    mb=$(git merge-base "$parent" "$branch" 2>/dev/null || true)
+    [[ -n "$mb" ]] && bases+=("$mb")
+  fi
+  if git rev-parse --verify --quiet "refs/remotes/origin/$parent" >/dev/null; then
+    mb=$(git merge-base "origin/$parent" "$branch" 2>/dev/null || true)
+    [[ -n "$mb" ]] && bases+=("$mb")
+  fi
+  # A pinned fork base is only trustworthy while it's still an ancestor of the
+  # branch; a rebase since it was recorded can leave it stranded off-history.
+  fb=$(stack_fork_base "$branch")
+  if [[ -n "$fb" ]]; then
+    fb=$(sha "$fb" 2>/dev/null || true)
+    [[ -n "$fb" ]] && is_ancestor "$fb" "$branch" && bases+=("$fb")
+  fi
+  if [[ ${#bases[@]} -eq 0 ]]; then
+    branch_exists "$parent" || git rev-parse --verify --quiet "refs/remotes/origin/$parent" >/dev/null \
+      || die "parent '$parent' of '$branch' doesn't exist locally or on origin."
+    die "'$branch' and '$parent' have no common ancestor."
+  fi
+
+  local base; base=$(diff_newest_commit "${bases[@]}")
+
+  if [[ $base_only -eq 1 ]]; then echo "$base"; return 0; fi
+
+  # Context goes to stderr, and only when stdout is a terminal, so piping the
+  # diff into a review tool or a file yields nothing but the diff itself.
+  if [[ -t 1 ]]; then
+    local n; n=$(ahead_count "$base" "$branch")
+    info "$branch vs $parent — $n commit(s) from fork point ${base:0:12}$([[ $dirty -eq 1 ]] && echo ' + working tree')"
+    [[ "$base" == "$tip" && $dirty -eq 0 ]] && info "no commits on '$branch' beyond '$parent'."
+  fi
+
+  # Revisions must precede the pathspec separator, hence the split arrays.
+  local -a revs=("$base")
+  [[ $dirty -eq 0 ]] && revs+=("$tip")
+  local -a pathsep=()
+  [[ ${#paths[@]} -gt 0 ]] && pathsep=(--)
+  git diff ${opts[@]+"${opts[@]}"} "${revs[@]}" \
+    ${pathsep[@]+"${pathsep[@]}"} ${paths[@]+"${paths[@]}"}
+}
+
 # ---- restack -------------------------------------------------------------
 # Rebase an entire branch stack into one clean linear history.
 #
@@ -1327,6 +1471,7 @@ case "$sub" in
   prs)            cmd_prs "$@" ;;
   review)         cmd_review "$@" ;;
   list)           cmd_list "$@" ;;
+  diff)           cmd_diff "$@" ;;
   checkout|co)    cmd_checkout "$@" ;;
   infer)          cmd_infer "$@" ;;
   parent)         cmd_parent "$@" ;;
