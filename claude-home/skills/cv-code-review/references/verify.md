@@ -16,6 +16,29 @@ the verifier from killing a finding merely because the trigger is uncertain.
 
 Keep candidates where the vote is CONFIRMED or PLAUSIBLE. Drop REFUTED.
 
+## Re-derive, do not inherit
+
+A finder wrote each candidate, and every factual claim in it is a **hypothesis**
+— including the ones stated as settled fact. Wherever a candidate turns on what
+some code, runtime, library, tool schema or binary *does* ("`agent()` throws
+rather than returning null", "this helper already guards it", "the enum rejects
+that value"), the verifier goes to that source and derives it itself. It does not
+carry the finder's reading forward.
+
+Finders work fast across a whole diff, and a confidently-worded claim with an
+executed-looking justification is exactly what a wrong one looks like — the false
+positives that survive into a report are never the tentative ones. So the
+verifier returns `rederived` alongside each verdict: which claim it checked,
+where, and whether it survived. A candidate whose mechanism was confirmed while
+its load-bearing premise was taken on trust has not been verified, it has been
+forwarded.
+
+The field is required rather than encouraged for a measured reason. A verify pass
+told only to "judge each candidate independently" refuted 1 of 52 candidates,
+while an orchestrator that named the specific claim to re-derive refuted 2 of 26
+and corrected the framing it had been handed on four batches besides. The
+instruction gets skimmed; a required field does not.
+
 ## Recall-biased overlay (high / xhigh / max / ultra)
 
 **PLAUSIBLE by default** — do not refute a candidate for being "speculative" or
@@ -75,8 +98,8 @@ the cap cuts; the synthesizer can overrule it, but it cannot invent it.
 
 Verification runs on the output of the pooling pass (SKILL.md Phase 1.5), which
 has already clustered candidates by **root cause** and grouped the clusters into
-**themed batches** of about four. One verifier agent per batch, returning one
-verdict per distinct defect in it.
+**themed batches** of about six (`BATCH_MAX` in the workflow). One verifier agent
+per batch, returning one verdict per distinct defect in it.
 
 Theme, not location. Batching by `(file, line)` looks equivalent and is not: it
 merges two different defects that share a line, splits one defect that two

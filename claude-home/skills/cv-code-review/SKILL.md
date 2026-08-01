@@ -132,6 +132,16 @@ Also pin, before spawning anything:
   finder is pointed at it and no later phase can tell. If the counts disagree,
   say so in the scope block and tell reviewers to re-derive the list themselves.
 - a one-paragraph summary of what changed,
+- **the unchanged files this change drives** — the script a new skill shells out
+  to, the binary a new step invokes, the config a new code path reads, the schema
+  an added call must satisfy. A procedure is only correct in reference to the
+  thing it drives, so reviewers holding nothing but the diff have a structural
+  blind spot here: a step that misreads a command's exit code, or compares the
+  wrong two trees, is invisible in its own text and obvious against the script it
+  runs. Pin the handful that actually decide whether a changed line is right, with
+  one line each on why. Frame them as **evidence, not review scope** — findings
+  still have to name a changed file, or the review starts reporting bugs in code
+  the user didn't touch and they compete for the same cap.
 - the **stated intent** of the change (below),
 - the CLAUDE.md files that govern the changed files (user-level
   `~/.claude/CLAUDE.md`, repo-root `CLAUDE.md`, plus any `CLAUDE.md` /
@@ -232,12 +242,20 @@ aren't counted by a range diff, so treat that number as a floor. This bounds
 
 ## Phase 0.5 — Specialize the angles
 
-Do this **in the same pass as Phase 0**, without handing off. Specializing
-requires having read the diff, and Phase 0 just produced it — split across two
-agents, the second pays a cold start and re-reads the whole artifact to reach
-the state the first one was already in, on the critical path. Inline you get
-this for free; on the workflow path it is one agent that scopes and then writes
-the assignments.
+Inline you get this for free — the orchestrating model has the diff in context
+and writes each finder's prompt itself. On the workflow path it is its own phase,
+**sharded** across a few agents that each own a disjoint slice of the angle
+roster and run concurrently.
+
+Sharding is the point. Specializing does require having read the diff, so folding
+it into Phase 0 saves a cold start and a second read of the artifact — but it buys
+that by making the highest-leverage prompt in the run a single long agent on the
+critical path (13 minutes, 16% of a measured run, at a parallelism factor of
+1.00×). Sharded, the cold start and the re-read are still paid; they are paid in
+parallel, which is the option a single merged agent does not have. Show every
+shard the whole roster and name the angles it does *not* own, so a lead that
+belongs to another angle is left to the shard writing that angle instead of being
+duplicated into three prompts.
 
 **Do not hand a finder the generic angle text and stop there.** A generic angle
 produces generic findings. Convert each angle into a numbered list of
@@ -296,11 +314,13 @@ the review is read-only until `--fix`.
 **Spend reasoning effort where it changes the output.** Reasoning effort drives
 output tokens, and output is the expensive tier — cached input costs an order of
 magnitude less, so the lever that matters is *which agents think hard*, not how
-many agents run. Find, Verify, Sweep and Synthesize get the level's full effort:
-they are the phases that reason about code. Pooling runs a tier below — it does
-read code, but it is judgement over short claims rather than open-ended hunting.
-Nothing goes below `medium`; past that the structured-output contracts start
-costing retries, which is a worse trade than the tokens saved.
+many agents run. Specialize, Find, Verify, Sweep and Synthesize get the level's
+full effort: they are the phases that reason about code, and Specialize sets the
+ceiling for all of them. Pooling runs a tier below — it does read code, but it is
+judgement over short claims rather than open-ended hunting — and so does Scope,
+which runs git commands and lists paths. Nothing goes below `medium`; past that
+the structured-output contracts start costing retries, which is a worse trade
+than the tokens saved.
 
 ## Phase 1 — Find candidates
 
@@ -349,14 +369,29 @@ defect is a fact about the code, not about the wording.
 
 1. **Cluster by root cause.** One cluster per underlying defect; the
    best-described candidate is the representative and the rest are recorded as
-   duplicate locations on it. Two candidates at the same `file:line` describing
-   genuinely different defects go in **different** clusters — a shared line
-   number is not evidence of a shared cause. A defect only one finder raised is a
-   cluster of one, and no weaker for it.
+   duplicate locations on it. A defect only one finder raised is a cluster of one,
+   and no weaker for it.
+
+   **The test, in both directions, is one edit.** Two candidates are one defect
+   when a single fix resolves both — however differently they were worded,
+   whatever line numbers or path spellings they used. They are different defects
+   when they need separate edits, however much they share a theme, a subsystem, or
+   one underlying misunderstanding. Two candidates at the same `file:line` can
+   still be two defects; two in different files can still be one.
+
+   Apply it both ways, because the errors are not symmetrical. A duplicate you
+   split costs one verifier and reports one defect twice — visible and cheap. A
+   distinct defect you merge is demoted to a duplicate *location* on another
+   finding, keeping no summary, no failure scenario and no verdict of its own: it
+   is never fixed, and nothing downstream can tell it was there. When you can't
+   decide, split — an extra verifier is cheap, a lost bug is not.
 2. **Batch the clusters by theme** — the mechanism or subsystem they concern, so
    one verifier reads that code once and judges every related claim against it.
-   About four clusters per batch. Group by what a verifier would have to
-   understand, not by file.
+   About six clusters per batch (`BATCH_MAX`). Group by what a verifier would have
+   to understand, not by file. Bigger batches are how a review that verifies far
+   more defects than its cap can report keeps its agent count down: related claims
+   are cheaper to judge together than to spawn separately for, and nothing is
+   dropped to get there.
 3. **Name the contradictions.** Where two candidates in a batch reach conflicting
    conclusions about the same code — one says a guard is missing that another says
    exists, two disagree on what a function returns — write that down and say what
@@ -390,6 +425,17 @@ Read `references/verify.md` for the ladders and the per-level voting rules.
   disagreements between the finders that raised them — a one-claim-per-agent split
   structurally cannot do either.
 - Give the verifier the diff, the batch, and the batch's contradictions.
+- **Re-derive, do not inherit.** Every factual claim inside a candidate is a
+  hypothesis, including the ones stated as settled fact. Where a candidate turns
+  on what some code, runtime, library, tool schema or binary *does*, the verifier
+  goes to that source and derives it itself rather than carrying the finder's
+  reading forward — and returns `rederived` saying which claim it checked, where,
+  and whether it survived. A candidate whose mechanism was confirmed while its
+  load-bearing premise was taken on trust has been forwarded, not verified. The
+  field is required rather than encouraged because the instruction gets skimmed:
+  a pass told only to judge independently refuted 1 of 52 candidates, while an
+  orchestrator that named the claim to re-derive refuted 2 of 26 and corrected
+  four framings besides.
 - Judge **each candidate independently on its own claim.** A shared theme is not
   a shared verdict.
 - A candidate annotated with other finders' framings of the same root cause:
@@ -445,14 +491,29 @@ Give each sweeper three things:
    landed and marked pending where it hasn't. Don't re-derive these.
 2. **The ruled-out list** — finder refutations plus whichever verifier REFUTED
    verdicts have arrived, with their evidence. Don't re-raise these.
-3. **Its slice of the computed coverage table** — the changed files that *no*
-   candidate has been raised against, derived by subtracting the candidate files
-   from the changed-file list. This is arithmetic you already have, so compute
-   it; never leave it to the sweeper to notice. A changed file with zero
-   candidates against it is usually a file nobody opened, and it is the highest
-   prior on unreviewed ground in the entire diff. Tell the sweeper to read its
-   files in full **first**. If every file has a candidate, point at the ones with
-   exactly one instead and run a single sweeper.
+3. **Its slice of the computed coverage table**, in **two tiers**. This is
+   arithmetic you already have, so compute it; never leave it to the sweeper to
+   notice.
+   - *No candidate raised* — the changed files nothing was raised against.
+     Usually a file nobody opened, and the highest prior on unreviewed ground in
+     the diff. Read these in full **first**.
+   - *Thin coverage* — files with one or two candidates, listed **with those
+     candidates underneath them** so the sweeper reads *past* what is already
+     spoken for.
+
+   Count candidates per file; do not flag them. A boolean cannot tell a file three
+   finders took apart from one that collected two shallow nits, and treating the
+   second as covered is a measured recall loss, not a theoretical one: in one run
+   the binary form marked a 152-line procedure covered on two candidates about
+   skill *names* inside it, the sweeper skipped the file, and the procedure held
+   the only high-severity defect in the diff. The look-past hints are what make the
+   thin tier work — "two finders flagged its skill-name references, nobody read the
+   procedure" is actionable where "2 candidates" is not, and it is mechanical, so
+   generate it. If every file is past the thin threshold, say so and run a single
+   sweeper on the focus areas instead.
+4. **The unchanged files this change drives**, from Phase 0. The sweep is the
+   phase with budget to go read them, and a procedure defect only shows up against
+   the thing the procedure runs.
 
 Then re-read the diff and enclosing functions looking ONLY for defects not
 already listed. Do not re-derive or re-confirm anything already there — the job is
@@ -496,6 +557,21 @@ clustered by an earlier pass — check that clustering against the code rather t
 trusting it. Escalate the kept entry's verdict to CONFIRMED if any merged member
 was CONFIRMED.
 
+**The test is one edit.** Merge two findings only when a single fix resolves both.
+A shared theme, a shared subsystem, or one shared underlying misunderstanding is
+not a shared root cause: if they need separate edits at separate lines they are
+separate findings, and merging one away costs the user a bug. A real run merged a
+confirmed counter bug (a `findersLost++` inside a `.then()` that a rejection
+skips) into an unrelated missing-`try`/`catch` finding because both were "about
+rejection versus null" — the fixes had nothing in common and the report carried
+one of them. When unsure, keep them apart.
+
+**A merge note carries each member's own summary, not just its location.** A bare
+`file:line` tells the reader another line is involved; it does not tell them there
+is a second thing to fix there. Since anything merged should have been fixable by
+the same edit, the note is the reader's only chance to catch a merge that
+shouldn't have happened.
+
 **Rank by real severity, most severe first.** Severity is the size of the
 consequence times the reachability of the trigger — not the angle that found it,
 not the verdict alone, and not the order the findings arrived in.
@@ -522,6 +598,13 @@ from scratch.
 highest real cost. Never silently drop a verified finding while there is room
 under a budget; when the cap does force a cut, say what class of thing got cut.
 
+**Return what the cap cut, itemized.** A review that verifies fifty defects and
+reports fifteen must hand back the other thirty-five — `file`, `line`, `summary`,
+`severity`, `category`, `verdict` each. A count alone (`distinctDefects: 52`
+beside fifteen findings) makes them unrecoverable: the user can't be told what was
+cut, `--fix` can't reach them, and the next review pays to re-derive all of it.
+Cut is a budget decision, not a judgement that a finding was wrong.
+
 Write a 2–3 sentence summary that describes **the report actually returned** —
 what the change is, what the worst defect is and why it's the worst, and what got
 cut. Not a description of the review process.
@@ -544,6 +627,11 @@ one block each: `path/to/file.ext:123 — summary`, then the failure scenario.
 If nothing survived, say exactly that in one line.
 
 Open with a one-line tally. Don't bury it.
+
+When the cap cut verified findings, say how many in the tally and list them
+compactly after the report — one line each, `path:line — summary`. They are
+verified defects that lost a budget contest, not rejects, and the workflow returns
+them in `cut` precisely so they can be shown.
 
 ### If findings are fixed later
 
@@ -646,6 +734,15 @@ in the **repo** (`claude-home/…`) and run `home-manager switch`. Editing the
   `claude-home/workflows/colton-code-review.js`.
 - **Verifier batch size**: `BATCH_MAX` in the same file. Smaller means more
   agents that each read less code; larger means fewer agents that risk skimming.
+  It is also the main lever on verify cost, which is ~47% of a run's tokens.
+- **Sweep aiming**: `THIN_MAX` — the candidate count at or below which a changed
+  file is handed to the sweep as thinly covered. Raising it sweeps more files
+  less deeply. Setting it to 0 restores the old "no candidate at all" behaviour
+  and reintroduces the recall loss documented in Phase 3.
+- **Shard counts**: `SWEEP_SHARDS` and `SPECIALIZE_SHARDS`. Both trade one long
+  serial agent for N concurrent ones that each pay a cold start and re-read the
+  diff. Worth it while the phase is on the critical path; not worth it if the
+  shards start duplicating each other's reading.
 - **Subagent roles**: `claude-home/agents/review-{finder,pooler,verifier,sweeper,synthesizer}.md`.
   The workflow passes each phase's `agentType`, so these files are live on both
   paths — a rename here needs the matching `agentType` string updated, or the

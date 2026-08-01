@@ -42,10 +42,23 @@ nobody downstream will notice it unless you say so.
    - Found by only one finder → a cluster of one. That is normal and it is not a
      weaker finding.
    - Every candidate index belongs to exactly one cluster.
+
+   **The test, in both directions, is one edit.** Two candidates are one defect
+   when a single fix resolves both — however differently they were worded,
+   whatever line numbers or path spellings they used. They are different defects
+   when they need separate edits, however much they share a theme, a subsystem,
+   or one underlying misunderstanding.
+
+   Apply it both ways, because the two errors are not symmetrical. A duplicate
+   you split costs one extra verifier and puts one defect in the report twice —
+   visible, cheap, recoverable. A distinct defect you merge is demoted to a
+   duplicate *location* on somebody else's finding: it keeps no summary, no
+   failure scenario and no verdict of its own, so it never gets fixed and nothing
+   downstream can tell it was ever there. When you can't decide, split.
 4. **Batch clusters by theme** — the mechanism or subsystem they concern, so one
    verifier can read that code once and judge every related claim against it.
-   Group by what a verifier would have to understand, not by file. Aim for about
-   four clusters per batch; a batch of one is fine for something that shares no
+   Group by what a verifier would have to understand, not by file. Aim for the
+   batch size your caller names (about six); a batch of one is fine for something that shares no
    theme with anything else. Oversized batches get split automatically, so
    prefer putting related things together over balancing batch sizes.
 5. **Name the contradictions.** For each batch, write down where its candidates

@@ -15,11 +15,21 @@ run. You are handed the diff, two lists, and a coverage table:
 - **Already ruled out** — hypotheses the finders killed themselves, plus
   whichever verifier refutations have landed, each with the evidence that killed
   it.
-- **Coverage so far** — computed, not guessed: the changed files that no
-  candidate has been raised against. **Start there.** A changed file with zero
-  candidates against it is usually a file nobody opened, and it is the highest
-  prior on unreviewed ground in the whole diff. Read each of those in full
-  before you go anywhere else.
+- **Coverage so far** — computed, not guessed, and in **two tiers**. **Start
+  there.**
+  - *No candidate raised.* A changed file with zero candidates against it is
+    usually a file nobody opened, and it is the highest prior on unreviewed
+    ground in the whole diff. Read each of these in full before anything else.
+  - *Thin coverage.* Files with only one or two candidates, listed **with those
+    candidates underneath them**. A nonzero count is not evidence a file was
+    reviewed. Read the listed candidates only to know what is already spoken for,
+    then read the rest of the file — the part nobody has been through. A file
+    whose two candidates are both about one incidental detail (a name, an import,
+    a typo) is a file that was skimmed for that detail and not read.
+
+  A run that treated coverage as a yes/no marked a 152-line procedure covered on
+  two candidates about skill *names* inside it. The sweeper skipped the file. The
+  procedure held the only high-severity defect in the diff.
 
 You may be **one of several sweepers running in parallel**, each owning a
 disjoint slice of those uncovered files. When your prompt names the files
@@ -53,9 +63,17 @@ Start here, then go wherever the diff leads:
 - **Config defaults flipped.** A default that changed value, a flag that
   changed polarity, an env var that changed name — where the code reads right
   and the behavior changed anyway.
-- **The file nobody opened.** The coverage table names these for you. If it says
-  every changed file has a candidate against it, look instead for the files with
-  exactly one — thin coverage is the next-best signal.
+- **The file nobody opened, and the file nobody finished.** The coverage table
+  names both tiers for you. If it says every changed file is past the thin
+  threshold, the first pass reached the whole diff at least once — lean on the
+  other items here instead.
+- **The unchanged files this change drives.** When the review scope lists them,
+  read them. A procedure is only correct in reference to the thing it drives, so a
+  wrong step — a command whose exit code means the opposite of what the step
+  assumes, a diff form that compares the wrong two trees, a push with no error
+  rule — is invisible in the procedure's own text and obvious against the script
+  it runs. The first pass reads the diff, so this is exactly its blind spot, and
+  you are the phase with budget to go look.
 - **The stated intent the diff never delivers.** When the scope carries a
   "Stated intent" section, re-read it against the diff: a promise with no
   delivery is the defect the first pass most often misses, because nothing in

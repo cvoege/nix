@@ -37,6 +37,19 @@ facts about the code.
    Escalate the kept entry's verdict to CONFIRMED if any merged member was
    CONFIRMED.
 
+   **The test is one edit.** Merge two findings only when a single fix resolves
+   both. A shared theme, a shared subsystem, or one shared underlying
+   misunderstanding is not a shared root cause: if the two need separate edits at
+   separate lines, they are separate findings, and merging one away costs the user
+   a bug. A real run merged a confirmed counter bug — a `findersLost++` inside a
+   `.then()` that a rejection skips — into an unrelated missing-`try`/`catch`
+   finding because both were "about rejection versus null". The fixes had nothing
+   in common and the report carried one of them.
+
+   When you are unsure, keep them apart. The cap cuts the tail and everything it
+   cuts is still reported back to your caller; a merged-away defect is invisible
+   even with the whole budget unspent.
+
 2. **Rank by real severity, most severe first.** Severity is the size of the
    consequence times the reachability of the trigger. It is not the angle that
    found it, not the verdict alone, and not the order you were handed.
