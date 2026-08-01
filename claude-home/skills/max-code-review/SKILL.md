@@ -232,11 +232,17 @@ aren't counted by a range diff, so treat that number as a floor. This bounds
 
 ## Phase 0.5 — Specialize the angles
 
+Do this **in the same pass as Phase 0**, without handing off. Specializing
+requires having read the diff, and Phase 0 just produced it — split across two
+agents, the second pays a cold start and re-reads the whole artifact to reach
+the state the first one was already in, on the critical path. Inline you get
+this for free; on the workflow path it is one agent that scopes and then writes
+the assignments.
+
 **Do not hand a finder the generic angle text and stop there.** A generic angle
-produces generic findings. Before fanning out, read the diff and convert each
-angle into a numbered list of **concrete hypotheses about this diff** — real
-symbols, real paths, phrased so the finder can confirm or refute each with
-`file:line` evidence.
+produces generic findings. Convert each angle into a numbered list of
+**concrete hypotheses about this diff** — real symbols, real paths, phrased so
+the finder can confirm or refute each with `file:line` evidence.
 
 Not this:
 
@@ -286,6 +292,15 @@ argues instead of executing.
 
 Never modify files in the repository, install packages, or change git state —
 the review is read-only until `--fix`.
+
+**Spend reasoning effort where it changes the output.** Reasoning effort drives
+output tokens, and output is the expensive tier — cached input costs an order of
+magnitude less, so the lever that matters is *which agents think hard*, not how
+many agents run. Find, Verify, Sweep and Synthesize get the level's full effort:
+they are the phases that reason about code. Pooling runs a tier below — it does
+read code, but it is judgement over short claims rather than open-ended hunting.
+Nothing goes below `medium`; past that the structured-output contracts start
+costing retries, which is a worse trade than the tokens saved.
 
 ## Phase 1 — Find candidates
 
@@ -407,18 +422,37 @@ Read `references/verify.md` for the ladders and the per-level voting rules.
 
 ## Phase 3 — Sweep for gaps (xhigh / max / ultra)
 
-Run **one more finder** as a fresh reviewer, and give it three things:
+**Run this phase concurrently with Phase 2, not after it.** Everything that
+steers a sweep is known the moment Find ends: the dedup set and the coverage
+table are arithmetic over the candidate list. Verdicts feed only two prose
+blocks, and both degrade gracefully — a candidate pending verification is still
+a candidate the sweeper must not re-derive, and the finders' own dead ends are
+the bulk of the ruled-out ledger either way. Waiting for the verify barrier
+(which itself waits on its slowest agent, typically ~3× its median) before
+starting the longest read in the review is pure dead time. Launch the sweepers
+*first* so they get scheduled ahead of the verify wave.
 
-1. **The surviving findings** — don't re-derive these.
-2. **The ruled-out list** — finder refutations plus verifier REFUTED verdicts with
-   their evidence. Don't re-raise these.
-3. **A computed coverage table** — the changed files that *no* candidate has been
-   raised against, derived by subtracting the candidate files from the
-   changed-file list. This is arithmetic you already have, so compute it; never
-   leave it to the sweeper to notice. A changed file with zero candidates against
-   it is usually a file nobody opened, and it is the highest prior on unreviewed
-   ground in the entire diff. Tell the sweeper to read those in full **first**. If
-   every file has a candidate, point at the ones with exactly one instead.
+**Shard it.** Split the uncovered files into disjoint slices, one sweeper each
+(three is a good default), and tell each shard which files the others own so
+none of them duplicates a read. One sweeper working every uncovered file in
+series is routinely the longest-running agent in the whole review. Keep the
+*total* candidate budget the same — divide it across the shards rather than
+giving each the full allowance, or the sweep triples its own verification cost.
+
+Give each sweeper three things:
+
+1. **The candidates already raised** — annotated with a verdict where one has
+   landed and marked pending where it hasn't. Don't re-derive these.
+2. **The ruled-out list** — finder refutations plus whichever verifier REFUTED
+   verdicts have arrived, with their evidence. Don't re-raise these.
+3. **Its slice of the computed coverage table** — the changed files that *no*
+   candidate has been raised against, derived by subtracting the candidate files
+   from the changed-file list. This is arithmetic you already have, so compute
+   it; never leave it to the sweeper to notice. A changed file with zero
+   candidates against it is usually a file nobody opened, and it is the highest
+   prior on unreviewed ground in the entire diff. Tell the sweeper to read its
+   files in full **first**. If every file has a candidate, point at the ones with
+   exactly one instead and run a single sweeper.
 
 Then re-read the diff and enclosing functions looking ONLY for defects not
 already listed. Do not re-derive or re-confirm anything already there — the job is
@@ -429,14 +463,17 @@ predicate methods with side effects); setup/teardown asymmetry in tests; config
 defaults flipped; pieces of the stated intent the diff promises but never
 delivers.
 
-Surface **up to 8 additional candidates**, each naming a defect not already on
-the list. If nothing new, return an empty sweep — do not pad. Sweep candidates
-go through the same verify pass.
+Surface **up to 8 additional candidates** across all shards, each naming a defect
+not already on the list. If nothing new, return an empty sweep — do not pad.
+Sweep candidates go through the same verify pass.
 
 At `ultra`, repeat the sweep until **two consecutive sweeps return nothing
 new**, then stop. Dedup each sweep against everything *seen*, not against
 everything *kept* — otherwise verifier-rejected findings reappear every round
-and the loop never converges.
+and the loop never converges. Round N+1 dedups and aims itself off round N's
+*candidates*, which are known immediately, so **don't wait for round N's verify
+wave before starting round N+1** — launch each round's verification and leave it
+running. Collect them all before synthesis.
 
 ## Phase 4 — Synthesize
 

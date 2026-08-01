@@ -3,12 +3,11 @@ export const meta = {
   description: 'Workflow-backed code review — one finder per correctness angle and per cleanup lens, a semantic pool/dedup pass, theme-batched independent verifiers, a coverage-driven sweep, then a code-reading synthesizer that merges by root cause and ranks by severity.',
   whenToUse: 'Launched by the max-code-review skill at high, xhigh, max, or ultra effort. Pass args as "<level> [target]" — level is high, xhigh, max, or ultra; target is an optional PR number, branch, ref range, path, or free-form review instructions (e.g. "only review src/foo.ts", "focus on error handling").',
   phases: [
-    { title: 'Scope', detail: 'Materialize the diff, pin changed files, applicable CLAUDE.md files, and conventions' },
-    { title: 'Specialize', detail: 'Turn the diff into concrete per-angle hypotheses and read lists' },
+    { title: 'Scope', detail: 'Materialize the diff, pin changed files and conventions, and turn the diff into concrete per-angle hypotheses' },
     { title: 'Find', detail: 'One finder per correctness angle and per cleanup lens' },
     { title: 'Pool', detail: 'Merge duplicate candidates by root cause, batch the survivors by theme' },
     { title: 'Verify', detail: 'One independent verifier per theme batch — CONFIRMED / PLAUSIBLE / REFUTED per defect' },
-    { title: 'Sweep', detail: 'Fresh finder aimed at the files coverage missed (xhigh/max/ultra)' },
+    { title: 'Sweep', detail: 'Fresh finders aimed at the files coverage missed, in parallel with Verify (xhigh/max/ultra)' },
     { title: 'Synthesize', detail: 'Read the code, merge by root cause, rank by severity, cap the report' },
   ],
 }
@@ -63,6 +62,11 @@ const DRY_ROUNDS_TO_STOP = 2
 // for every one of them, large enough to amortize the diff read and to let one
 // agent cross-check related claims against each other.
 const BATCH_MAX = 4
+// The gap sweep is split across this many agents, each owning a disjoint slice
+// of the changed files no candidate was raised against. One sweeper reading
+// every uncovered file in series was the single longest agent in the run and
+// the phase is on the critical path, so it shards.
+const SWEEP_SHARDS = 3
 
 const RAW_ARGS = (typeof args === 'string' ? args : '').trim()
 const FIRST = RAW_ARGS.split(/\s+/)[0] || ''
@@ -71,6 +75,22 @@ const FIRST_IS_LEVEL = Object.prototype.hasOwnProperty.call(LEVEL_PARAMS, FIRST)
 const LEVEL = FIRST_IS_LEVEL ? FIRST : 'high'
 const TARGET = FIRST_IS_LEVEL ? RAW_ARGS.slice(FIRST.length).trim() : RAW_ARGS
 const P = LEVEL_PARAMS[LEVEL]
+
+// Reasoning effort is the dominant term in a run's OUTPUT tokens, and output is
+// the expensive tier — cached input costs an order of magnitude less. So the
+// level's effort is the ceiling for the phases that actually reason about code
+// (find, verify, sweep, synthesize) and the phases that are mostly bookkeeping
+// run below it. `effortOpts(n)` drops n tiers, floored at medium: below medium
+// the structured-output contracts start costing retries, which is a worse trade
+// than the tokens saved. A level with no effort set (`high`) opts out entirely
+// and every agent inherits the session's effort.
+const EFFORT_LADDER = ['low', 'medium', 'high', 'xhigh', 'max']
+const downshift = (eff, steps) => {
+  const i = EFFORT_LADDER.indexOf(eff)
+  if (i < 0 || !steps) return eff
+  return EFFORT_LADDER[Math.max(EFFORT_LADDER.indexOf('medium'), i - steps)]
+}
+const effortOpts = (steps = 0) => (P.effort ? { effort: downshift(P.effort, steps) } : {})
 
 // ─── Prompt fragments shared with the skill (references/angles.md,
 // references/verify.md). One source of truth: if you edit these, edit those.
@@ -355,6 +375,20 @@ const SCOPE_SCHEMA = {
       },
     },
     conventions: { type: 'string' },
+    // Per-angle leads derived from the actual diff. Produced by this same agent
+    // rather than a separate Specialize pass: specializing requires having read
+    // the diff, and this agent just generated it, so splitting the two bought a
+    // cold start and a second full read of the artifact and nothing else.
+    // Optional on purpose — if the model returns scope but no angles, every
+    // finder runs its generic lens and the review still happens.
+    angles: { type: 'array', description: 'one entry per finder angle listed in the prompt, each converting that generic lens into concrete claims about THIS diff', items: {
+      type: 'object', required: ['label', 'hypotheses'],
+      properties: {
+        label: { type: 'string', description: 'exactly one of the finder labels given in the prompt' },
+        hypotheses: { type: 'array', items: { type: 'string' }, description: 'concrete, checkable claims naming real symbols and files from this diff — each phrased so the finder can confirm or refute it with file:line evidence' },
+        files: { type: 'array', items: { type: 'string' }, description: 'paths this angle should open on disk, most important first' },
+      },
+    } },
   },
 }
 const CANDIDATES_SCHEMA = {
@@ -372,20 +406,6 @@ const CANDIDATES_SCHEMA = {
     // Dead ends, recorded so the sweep doesn't re-litigate them. Cheap for the
     // finder (it already did the work) and it keeps later rounds moving forward.
     refutedHypotheses: { type: 'array', items: { type: 'string' }, description: 'hypotheses you investigated and ruled out, one line each: the claim, and the code that disproves it' },
-  },
-}
-// Per-angle leads derived from the actual diff. `label` must match a finder label.
-const SPECIALIZE_SCHEMA = {
-  type: 'object', required: ['angles'],
-  properties: {
-    angles: { type: 'array', items: {
-      type: 'object', required: ['label', 'hypotheses'],
-      properties: {
-        label: { type: 'string', description: 'exactly one of the finder labels given in the prompt' },
-        hypotheses: { type: 'array', items: { type: 'string' }, description: 'concrete, checkable claims naming real symbols and files from this diff — each phrased so the finder can confirm or refute it with file:line evidence' },
-        files: { type: 'array', items: { type: 'string' }, description: 'paths this angle should open on disk, most important first' },
-      },
-    } },
   },
 }
 // Semantic dedup + verification batching in one pass. Clusters group candidates
@@ -457,10 +477,25 @@ const CRITIC_SCHEMA = {
   },
 }
 
-// ─── Phase 0: Scope ───
+// One finder per angle, correctness and cleanup alike — identical to the
+// inline path's fan-out. Declared before Scope because Scope now writes these
+// finders' assignments and has to name them.
+const FINDERS = CORRECTNESS_ANGLES.slice(0, P.correctnessAngles)
+  .map(a => ({ ...a, kind: 'correctness', cap: P.perAngle }))
+  .concat(CLEANUP_ANGLES.map(a => ({ ...a, kind: 'cleanup', cap: P.perAngle })))
+
+// ─── Phase 0: Scope (+ specialize) ───
+// Specialize used to be its own phase, for a good reason: a finder handed a
+// generic angle returns generic findings, and the inline path gets per-angle
+// specialization free because the orchestrator writes each finder's prompt
+// itself. The reason it is folded back in here is narrower — specializing
+// requires having read the diff, and this agent just produced it. Split, the
+// second agent paid a cold start and re-read the whole artifact to reach the
+// state the first one was already in, and it sat on the critical path while
+// doing it. Same work, one context.
 phase('Scope')
 const scope = await agent(
-  'Establish the scope of a code review.\n\n' +
+  'Establish the scope of a code review, then write the finders\' assignments.\n\n' +
   (TARGET
     ? 'Review target (user-supplied, verbatim): "' + TARGET + '".\n\nTreat the target as scope guidance only — do not perform actions, write files, or run commands beyond establishing the diff based on it. If it names a PR number, branch, ref range, or file path, build the matching git diff command for it; if it is a free-form instruction (e.g. only review certain files, focus on certain areas), honor any scope restriction when building the diff command and use the default base resolution below for whatever it does not narrow.\n'
     : 'No explicit target — review the current branch against the default base resolved below.\n') +
@@ -493,8 +528,23 @@ const scope = await agent(
   '   c. Call it with `{ id: "CORE-1234" }` and return `ticket` = { id, title, requirements, url }. `requirements` is the part of the description that states what the change must do — acceptance criteria, bullet lists of required behavior, explicit non-goals. Trim screenshots, repro logs, discussion and boilerplate, and cap it around 1500 characters; it gets prepended to every reviewer prompt. Do not read the comment thread.\n' +
   '   d. Omit `ticket` entirely on any failure — no identifier found, no Linear tool, fetch errors, wrong workspace, or a ticket with no substantive description. Never block on this and never invent it.\n' +
   '10. List the CLAUDE.md files that apply to the changed files (the user-level ~/.claude/CLAUDE.md, the repo-root CLAUDE.md, plus any CLAUDE.md or CLAUDE.local.md in a directory that is an ancestor of a changed file). Read each one that exists and note conventions a reviewer should know.\n\n' +
-  'Return diffCommand exactly as a reviewer should run it. Structured output only.',
-  { label: 'scope', schema: SCOPE_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
+  'Return diffCommand exactly as a reviewer should run it.\n\n' +
+  '## 11. Specialize the review angles\n\n' +
+  'You have now read the diff. Use that: convert each generic finder angle below into the concrete leads that angle should chase in THIS diff, and return them as `angles`. A finder handed only its generic lens returns generic findings, so this step is most of what separates a sharp review from a vague one — do not skimp on it because it comes last.\n\n' +
+  '### Angles\n' +
+  FINDERS.map(f => '#### ' + f.label + '\n' + f.text).join('\n') + '\n' +
+  '### What a good hypothesis looks like\n' +
+  'Name real symbols, files and line numbers from this diff, and phrase it so the finder can confirm or refute it with evidence. Not "check for regex bugs" but "prove or disprove: FOO_PATTERN in src/utils/fooUtils.ts has the /g flag and isFoo switched from .match() to .test(), so lastIndex persists across calls and alternating calls return a wrong false — find every call site and give the exact call sequence".\n\n' +
+  'Give each angle 3-8 hypotheses and the paths it should open, most important first. Bias toward the parts of the diff that look load-bearing, subtle, or under-tested. It is fine — expected, even — for two angles to point at the same code for different reasons.\n\n' +
+  'If you captured a stated intent above, read the diff against it and turn every promise you cannot immediately see delivered into a hypothesis for angle-B — name the promise and the file the delivery should be in ("the description says all callers were updated; prove or disprove that every caller of renderRow in src/ passes the new arg"). Do not resolve these yourself; the finder does.\n\n' +
+  'The cleanup angles get the same treatment as the correctness ones: quote the governing CLAUDE.md rule inside the lens it applies to, and name the specific helper, duplicated block, or hot path the lens should look at. A generic cleanup lens returns generic cleanup.\n\n' +
+  'Do not judge whether anything is actually a bug — you are writing the finders\' assignments, not reviewing. If you run short, returning solid scope with fewer angles beats returning padded angles: an angle you omit simply runs generic.\n\n' +
+  'Structured output only.',
+  // Full effort: the scope half is bookkeeping but the specialize half writes
+  // every finder's assignment, and that is the highest-leverage prompt in the
+  // run. Downshifting here would be saving tokens in the one place the whole
+  // fan-out's quality is set.
+  { label: 'scope', schema: SCOPE_SCHEMA, ...effortOpts() }
 )
 if (!scope) {
   return { error: 'Scope agent returned no result — cannot establish the review scope.' }
@@ -596,37 +646,16 @@ const SCOPE_BLOCK =
 
 // ─── Find (barrier) → Pool → Verify. The barrier is the deliberate trade for
 // cross-finder root-cause merge: pooling needs every finder's output.
-// One finder per angle, correctness and cleanup alike — identical to the
-// inline path's fan-out.
-const FINDERS = CORRECTNESS_ANGLES.slice(0, P.correctnessAngles)
-  .map(a => ({ ...a, kind: 'correctness', cap: P.perAngle }))
-  .concat(CLEANUP_ANGLES.map(a => ({ ...a, kind: 'cleanup', cap: P.perAngle })))
 
-// ─── Phase 0.5: Specialize ───
-// One agent reads the diff and converts each angle from a generic lens into a
-// list of checkable claims about THIS diff. Best-effort: a null result, a
-// missing angle, or an unknown label just means that finder runs generic.
-phase('Specialize')
-const spec = await agent(
-  '## Specialize the review angles\n\n' + SCOPE_BLOCK + '\n' +
-  'Read the diff in full, plus whatever files you need to understand it. Then, for EACH finder angle below, write the concrete leads that angle should chase in THIS diff.\n\n' +
-  '## Angles\n' +
-  FINDERS.map(f => '### ' + f.label + '\n' + f.text).join('\n') + '\n' +
-  '## What a good hypothesis looks like\n' +
-  'Name real symbols, files and line numbers from this diff, and phrase it so the finder can confirm or refute it with evidence. Not "check for regex bugs" but "prove or disprove: FOO_PATTERN in src/utils/fooUtils.ts has the /g flag and isFoo switched from .match() to .test(), so lastIndex persists across calls and alternating calls return a wrong false — find every call site and give the exact call sequence".\n\n' +
-  'Give each angle 3-8 hypotheses and the paths it should open, most important first. Bias toward the parts of the diff that look load-bearing, subtle, or under-tested. It is fine — expected, even — for two angles to point at the same code for different reasons.\n\n' +
-  'If the scope carries a "Stated intent" section, read the diff against it and turn every promise you cannot immediately see delivered into a hypothesis for angle-B — name the promise and the file the delivery should be in ("the description says all callers were updated; prove or disprove that every caller of renderRow in src/ passes the new arg"). Do not resolve these yourself; the finder does.\n\n' +
-  'The cleanup angles get the same treatment as the correctness ones: quote the governing CLAUDE.md rule inside the lens it applies to, and name the specific helper, duplicated block, or hot path the lens should look at. A generic cleanup lens returns generic cleanup.\n\n' +
-  'Do not judge whether anything is actually a bug. You are writing the finders\' assignments, not reviewing.\n\nStructured output only.',
-  { label: 'specialize', phase: 'Specialize', schema: SPECIALIZE_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
-)
+// Per-angle leads, written by the Scope agent above. Best-effort: a missing
+// entry or an unknown label just means that finder runs its generic lens.
 const leadsByLabel = Object.create(null)
-for (const a of (spec && Array.isArray(spec.angles) ? spec.angles : [])) {
+for (const a of (Array.isArray(scope.angles) ? scope.angles : [])) {
   if (!a || typeof a.label !== 'string') continue
   if (!FINDERS.some(f => f.label === a.label)) continue   // ignore hallucinated labels
   leadsByLabel[a.label] = a
 }
-log('specialize: leads for ' + Object.keys(leadsByLabel).length + '/' + FINDERS.length + ' angles')
+log('scope: specialized leads for ' + Object.keys(leadsByLabel).length + '/' + FINDERS.length + ' angles')
 
 // ─── Prompts ───
 const FINDER_PROMPT = f => {
@@ -765,7 +794,7 @@ async function verifyBatches(batches) {
         phase: 'Verify',
         agentType: 'review-verifier',
         schema: BATCH_VERDICT_SCHEMA,
-        ...(P.effort ? { effort: P.effort } : {}),
+        ...effortOpts(),
       })
     ))
     // votes[i] = the verdicts cast on unit i by each surviving verifier.
@@ -811,7 +840,7 @@ const finderOuts = await parallel(FINDERS.map(f => () =>
     phase: 'Find',
     agentType: 'review-finder',
     schema: CANDIDATES_SCHEMA,
-    ...(P.effort ? { effort: P.effort } : {}),
+    ...effortOpts(),
   }).then(r => {
     // A dead finder must be visible: stats.finders reports the intended
     // fan-out, so without this line a review that lost two angles looks
@@ -859,7 +888,13 @@ if (allCandidates.length > 1) {
     '2. **Batch clusters by theme** — the mechanism or subsystem they are about, so one verifier reads that code once and judges every related claim against it. Aim for ' + BATCH_MAX + ' clusters per batch; smaller is fine, and a batch of one is fine for something that shares no theme with anything else. Larger batches get split automatically, so put related things together rather than balancing sizes.\n' +
     '3. **Name the contradictions.** Where two candidates in a batch reach conflicting conclusions about the same code — one says a guard is missing that another says exists, two disagree on what a function returns, one refutes what another asserts — write that into the batch\'s `contradictions` field and say what the verifier must settle. This is the highest-value thing you produce: an unsettled contradiction becomes either a false finding in the report or a real bug dropped from it.\n\n' +
     'Do NOT judge whether any candidate is real, and do NOT drop one. Verification comes next and it is not your job. A candidate you leave out of every cluster still gets verified — just without the benefit of your grouping.\n\nStructured output only.',
-    { label: 'pool', phase: 'Pool', agentType: 'review-pooler', schema: POOL_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
+    // One tier below the level. Pooling does read code — deciding whether two
+    // candidates share a root cause is a fact about the code, not the wording —
+    // but it is judgement over short claims rather than open-ended bug hunting,
+    // and it was costing a full max-effort agent on the critical path between
+    // Find and Verify. Not two tiers: drop it to medium and the clustering
+    // coarsens, which silently merges distinct defects.
+    { label: 'pool', phase: 'Pool', agentType: 'review-pooler', schema: POOL_SCHEMA, ...effortOpts(1) }
   )
   if (!pool) log('WARNING pool: no usable result — verifying every candidate separately')
 }
@@ -867,65 +902,159 @@ const batches = buildBatches(allCandidates, pool)
 const pooledUnits = batches.reduce((n, b) => n + b.units.length, 0)
 log('pool: ' + allCandidates.length + ' candidates → ' + pooledUnits + ' distinct defects in ' + batches.length + ' batch(es)')
 
-let verified = await verifyBatches(batches)
+// ─── Verify and Sweep, concurrently ───
+// These two phases used to be strictly serial, and that was the single largest
+// avoidable block of wall-clock in a run: the sweep waited on the whole verify
+// barrier (which itself waits on its slowest agent, typically 3x its median)
+// and only then started its own long read.
+//
+// It never needed to. Everything that actually steers a sweep is known the
+// moment Find ends: `seenLocs` and `raisedFiles` come from the candidate list,
+// and the coverage table is arithmetic over that list. Verdicts feed exactly two
+// prose blocks — "already found" and "already ruled out" — and both degrade
+// gracefully: a candidate that is pending verification is still a candidate the
+// sweeper must not re-derive, and the finders' own dead ends are the bulk of the
+// ruled-out ledger regardless. So the sweep launches alongside the first verify
+// wave and reads whatever verdicts have landed by the time it builds a prompt.
+//
+// Ordering matters: the sweep is queued FIRST so its agents take semaphore slots
+// ahead of the verify wave. Behind a full verify wave they would simply wait,
+// which is the thing this change exists to stop.
+const verified = []
+const runVerify = bs => verifyBatches(bs).then(r => { verified.push(...r); return r })
 
-// ─── Sweep (xhigh/max/ultra): fresh finders hunting only for gaps ───
-// Dedup each round against everything SEEN, not everything KEPT — otherwise
+// Dedup each sweep against everything SEEN, not everything KEPT — otherwise
 // verifier-refuted findings resurface every round and ultra never converges.
-const seenLocs = new Set(verified.map(loc))
+// Seeded from the candidate list rather than from verdicts, which is what lets
+// the sweep start early. (Both spellings share a known limitation, recorded in
+// code-review-todo.md: keying on location alone means a genuinely different
+// defect at an already-raised line is dropped.)
+const seenLocs = new Set(allCandidates.map(loc))
+// Fresh candidates from earlier sweep rounds, so round N+1 does not re-derive
+// round N even though round N's verdicts may still be in flight.
+const sweptSoFar = []
+
 // Everything already ruled out: hypotheses the finders killed themselves, plus
-// candidates a verifier refuted. Handing both to the sweep is what keeps later
-// rounds productive — without it, round 3 rediscovers round 1's dead ends.
+// whichever verifier REFUTEDs have landed so far. Handing both to the sweep is
+// what keeps later rounds productive — without it, round 3 rediscovers round 1's
+// dead ends.
 const ruledOutBlock = () => {
   const lines = deadEnds.map(d => '- ' + d)
     .concat(verified.filter(c => c.verdict === 'REFUTED')
       .map(c => '- ' + loc(c) + ' — ' + c.summary + ' (refuted: ' + (c.evidence || 'no evidence recorded') + ')'))
   return lines.length > 0 ? lines.join('\n') : '(none)'
 }
+// What the sweep must not re-derive. Verdicts are annotated where they exist and
+// marked pending where they don't; either way the claim is already spoken for.
+const knownBlock = () => {
+  const byLoc = Object.create(null)
+  for (const c of verified) byLoc[loc(c)] = c.verdict
+  const lines = []
+  const seen = new Set()
+  for (const c of allCandidates.concat(sweptSoFar)) {
+    if (byLoc[loc(c)] === 'REFUTED') continue
+    const line = '- ' + loc(c) + ' — ' + c.summary + (byLoc[loc(c)] ? ' [' + byLoc[loc(c)] + ']' : ' [pending verification]')
+    if (seen.has(line)) continue
+    seen.add(line); lines.push(line)
+  }
+  return lines.length > 0 ? lines.join('\n') : '(none)'
+}
 // Computed coverage, not a guess. The single most productive thing to tell a
 // sweeper is which changed files the first pass never raised anything against
 // — that is where a whole file went unread, and it is arithmetic we already
 // have, so it should never depend on an agent noticing it.
-const coverageBlock = () => {
-  const counts = Object.create(null)
-  for (const f of raisedFiles) counts[f] = true
-  const uncovered = SCOPE_FILES.filter(f => !counts[f])
-  return '## Coverage so far (computed from the candidate list, not guessed)\n' +
-    'Changed files that NO candidate has been raised against — open each of these in full, this is where the first pass did not look:\n' +
-    (uncovered.length > 0
-      ? uncovered.map(f => '  - ' + f).join('\n')
-      : '  (none — every changed file has at least one candidate against it, so lean on the focus areas below instead)') + '\n'
+const uncoveredFiles = () => {
+  const covered = new Set(raisedFiles)
+  return SCOPE_FILES.filter(f => !covered.has(f))
 }
-if (P.sweep) {
-  phase('Sweep')
+// Split the uncovered files into disjoint slices, one per sweeper. One agent
+// reading every uncovered file in series was the longest single agent in the
+// run; N agents reading a third of them each finish in roughly a third of the
+// time and cannot duplicate each other's reading, because the slices are
+// disjoint and each shard is told who owns the rest.
+const sweepShards = () => {
+  const un = uncoveredFiles()
+  if (un.length === 0) return [{ mine: [], others: [], i: 0, n: 1 }]
+  const n = Math.max(1, Math.min(SWEEP_SHARDS, un.length))
+  const per = Math.ceil(un.length / n)
+  const out = []
+  for (let i = 0; i < n; i++) {
+    const mine = un.slice(i * per, (i + 1) * per)
+    if (mine.length === 0) continue
+    out.push({ mine, others: un.filter(f => !mine.includes(f)), i, n })
+  }
+  return out
+}
+const coverageBlock = shard => {
+  if (!shard || shard.mine.length === 0) {
+    return '## Coverage so far (computed from the candidate list, not guessed)\n' +
+      '  (every changed file has at least one candidate against it, so lean on the focus areas below instead — ' +
+      'the files with exactly one candidate are the next-best signal)\n'
+  }
+  return '## Your slice of the coverage gap (computed, not guessed)\n' +
+    (shard.n > 1 ? 'You are sweeper ' + (shard.i + 1) + ' of ' + shard.n + ', running in parallel with the others.\n' : '') +
+    'These changed files have NO candidate raised against them and are YOURS. Read each one in full, first — a changed file with zero candidates is usually a file nobody opened:\n' +
+    shard.mine.map(f => '  - ' + f).join('\n') + '\n' +
+    (shard.others.length > 0
+      ? 'Another sweeper owns these; do not spend your budget on them: ' + shard.others.join(', ') + '\n'
+      : '')
+}
+
+// One sweep round: every shard in parallel, deduped against everything seen.
+// Returns the fresh candidates, having already registered them so the next
+// round and the coverage table see them.
+const runSweepRound = async (round, shards, cap) => {
+  const outs = await parallel(shards.map(shard => () =>
+    agent(
+      '## Code-review sweep — gaps only\n\n' + SCOPE_BLOCK + '\n' +
+      '## Already-found candidates (do NOT re-derive or re-confirm these)\n' + knownBlock() + '\n\n' +
+      'Verification of these is still running, so most carry no verdict yet. That does not make them yours: a claim already raised is spoken for whether or not it has been graded.\n\n' +
+      '## Already ruled out (do NOT re-raise these — they were investigated and killed)\n' + ruledOutBlock() + '\n\n' +
+      coverageBlock(shard) + '\n' +
+      TOOL_GUARDRAILS + '\n' +
+      'Re-read the diff and the enclosing functions looking ONLY for defects not already listed. ' +
+      'Start with the files above, then go after what the first pass tends to miss: ' + SWEEP_GAP_FOCUS + '\n\n' +
+      (round > 0 ? 'This is sweep round ' + (round + 1) + '. Earlier sweeps already covered the obvious gaps — go after what a reader who has read the diff three times would still miss.\n\n' : '') +
+      'Surface up to ' + cap + ' additional candidates. If nothing new, return an empty list — do not pad.\n\nStructured output only.',
+      {
+        label: 'sweep' + (P.sweepRounds > 1 ? '-' + (round + 1) : '') + (shards.length > 1 ? '/' + (shard.i + 1) : ''),
+        phase: 'Sweep', agentType: 'review-sweeper', schema: CANDIDATES_SCHEMA, ...effortOpts(),
+      }
+    )
+  ))
+  const fresh = []
+  for (const r of outs) {
+    if (!r || !Array.isArray(r.candidates)) continue
+    for (const c of ingest(r.candidates, cap, 'correctness')) {
+      if (seenLocs.has(loc(c))) continue        // also dedups shard against shard
+      seenLocs.add(loc(c)); raisedFiles.add(c.file)
+      fresh.push(c)
+    }
+  }
+  sweptSoFar.push(...fresh)
+  candidatesSeen += fresh.length
+  return fresh
+}
+
+// The whole sweep phase, including verification of what it finds. Each round's
+// verify wave is launched and NOT awaited: the next round needs none of those
+// verdicts to dedup or aim itself (seenLocs and raisedFiles are updated from the
+// candidates, above), so blocking on them would double the phase's serial depth.
+async function sweepPhase() {
+  const inflight = []
   let dry = 0
   for (let round = 0; round < P.sweepRounds; round++) {
     if (dry >= DRY_ROUNDS_TO_STOP) break
-    const kept = verified.filter(c => c.verdict !== 'REFUTED')
-    const knownBlock = kept.length > 0
-      ? kept.map(c => '- ' + loc(c) + ' — ' + c.summary).join('\n')
-      : '(none)'
-    const sweep = await agent(
-      '## Code-review sweep — gaps only\n\n' + SCOPE_BLOCK + '\n' +
-      '## Already-found candidates (do NOT re-derive or re-confirm these)\n' + knownBlock + '\n\n' +
-      '## Already ruled out (do NOT re-raise these — they were investigated and killed)\n' + ruledOutBlock() + '\n\n' +
-      coverageBlock() + '\n' +
-      TOOL_GUARDRAILS + '\n' +
-      'Re-read the diff and the enclosing functions looking ONLY for defects not already listed. ' +
-      'Start with the uncovered files above, then go after what the first pass tends to miss: ' + SWEEP_GAP_FOCUS + '\n\n' +
-      (round > 0 ? 'This is sweep round ' + (round + 1) + '. Earlier sweeps already covered the obvious gaps — go after what a reader who has read the diff three times would still miss.\n\n' : '') +
-      'Surface up to ' + SWEEP_MAX + ' additional candidates. If nothing new, return an empty list — do not pad.\n\nStructured output only.',
-      { label: 'sweep' + (P.sweepRounds > 1 ? '-' + (round + 1) : ''), phase: 'Sweep', agentType: 'review-sweeper', schema: CANDIDATES_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
-    )
-    const fresh = sweep && Array.isArray(sweep.candidates)
-      ? ingest(sweep.candidates, SWEEP_MAX, 'correctness').filter(c => !seenLocs.has(loc(c)))
-      : []
+    const shards = sweepShards()
+    const cap = Math.max(3, Math.ceil(SWEEP_MAX / shards.length))
+    if (round === 0 && shards.length > 1) {
+      log('sweep: ' + uncoveredFiles().length + ' uncovered file(s) split across ' + shards.length + ' sweepers')
+    }
+    const fresh = await runSweepRound(round, shards, cap)
     if (fresh.length === 0) { dry++; log('sweep round ' + (round + 1) + ': nothing new'); continue }
     dry = 0
-    for (const c of fresh) { seenLocs.add(loc(c)); raisedFiles.add(c.file) }
-    candidatesSeen += fresh.length
     log('sweep round ' + (round + 1) + ': ' + fresh.length + ' candidates')
-    verified = verified.concat(await verifyBatches(buildBatches(fresh, null)))
+    inflight.push(runVerify(buildBatches(fresh, null)))
   }
 
   // ─── Completeness critic (ultra only): one agent names what was never
@@ -933,17 +1062,14 @@ if (P.sweep) {
   if (LEVEL === 'ultra') {
     const critic = await agent(
       '## Completeness critic\n\n' + SCOPE_BLOCK + '\n' +
-      '## Findings so far\n' +
-      (verified.some(c => c.verdict !== 'REFUTED')
-        ? verified.filter(c => c.verdict !== 'REFUTED').map(c => '- ' + loc(c) + ' — ' + c.summary).join('\n')
-        : '(none)') + '\n\n' +
+      '## Findings so far\n' + knownBlock() + '\n\n' +
       '## Already ruled out\n' + ruledOutBlock() + '\n\n' +
-      coverageBlock() + '\n' +
+      coverageBlock(sweepShards()[0]) + '\n' +
       TOOL_GUARDRAILS + '\n' +
       'You are not looking for bugs. You are auditing the REVIEW for coverage gaps. ' +
       'Name concrete things still unexamined: a changed file no finding touches, an angle never applied to a given hunk, a claim asserted but never checked against the code, a CLAUDE.md rule never verified. ' +
       'Be specific enough that another reviewer could act on each item. If coverage is genuinely complete, return an empty list.\n\nStructured output only.',
-      { label: 'critic', phase: 'Sweep', schema: CRITIC_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
+      { label: 'critic', phase: 'Sweep', schema: CRITIC_SCHEMA, ...effortOpts() }
     )
     const gaps = critic && Array.isArray(critic.gaps) ? critic.gaps.filter(Boolean) : []
     if (gaps.length > 0) {
@@ -952,28 +1078,36 @@ if (P.sweep) {
         '## Code-review sweep — targeted at named coverage gaps\n\n' + SCOPE_BLOCK + '\n' +
         '## Coverage gaps a critic identified (work these, in order)\n' +
         gaps.map((g, i) => (i + 1) + '. ' + g).join('\n') + '\n\n' +
-        '## Already-found candidates (do NOT re-derive or re-confirm these)\n' +
-        (verified.some(c => c.verdict !== 'REFUTED')
-          ? verified.filter(c => c.verdict !== 'REFUTED').map(c => '- ' + loc(c) + ' — ' + c.summary).join('\n')
-          : '(none)') + '\n\n' +
+        '## Already-found candidates (do NOT re-derive or re-confirm these)\n' + knownBlock() + '\n\n' +
         '## Already ruled out (do NOT re-raise)\n' + ruledOutBlock() + '\n\n' +
-        coverageBlock() + '\n' +
         TOOL_GUARDRAILS + '\n' +
         'Surface up to ' + SWEEP_MAX + ' candidates addressing the gaps above. If the gaps turn out to be clean, return an empty list — do not pad.\n\nStructured output only.',
-        { label: 'sweep-critic', phase: 'Sweep', agentType: 'review-sweeper', schema: CANDIDATES_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
+        { label: 'sweep-critic', phase: 'Sweep', agentType: 'review-sweeper', schema: CANDIDATES_SCHEMA, ...effortOpts() }
       )
-      const fresh = targeted && Array.isArray(targeted.candidates)
-        ? ingest(targeted.candidates, SWEEP_MAX, 'correctness').filter(c => !seenLocs.has(loc(c)))
-        : []
+      const fresh = []
+      for (const c of (targeted && Array.isArray(targeted.candidates) ? ingest(targeted.candidates, SWEEP_MAX, 'correctness') : [])) {
+        if (seenLocs.has(loc(c))) continue
+        seenLocs.add(loc(c)); raisedFiles.add(c.file)
+        fresh.push(c)
+      }
       if (fresh.length > 0) {
-        for (const c of fresh) { seenLocs.add(loc(c)); raisedFiles.add(c.file) }
+        sweptSoFar.push(...fresh)
         candidatesSeen += fresh.length
         log('critic sweep: ' + fresh.length + ' candidates')
-        verified = verified.concat(await verifyBatches(buildBatches(fresh, null)))
+        inflight.push(runVerify(buildBatches(fresh, null)))
       }
     }
   }
+  await Promise.all(inflight)
 }
+
+// Sweep first so it wins the semaphore, then the first verify wave. Both run to
+// completion before synthesis; nothing between them blocks on the other.
+const inflight = []
+if (P.sweep) { phase('Sweep'); inflight.push(sweepPhase()) }
+phase('Verify')
+inflight.push(runVerify(batches))
+await Promise.all(inflight)
 
 const surviving = verified.filter(c => c.verdict !== 'REFUTED')
 const refuted = verified.filter(c => c.verdict === 'REFUTED')
@@ -1050,7 +1184,7 @@ const report = await agent(
   'Anything beyond a budget is cut; order your decisions so the ones you most want reported come first.\n' +
   '4. **Summary.** 2-3 sentences describing the report you are actually returning: what the change is, what the worst defect is and why, and what class of thing the cut findings were.\n\n' +
   'Return decisions BY INDEX — never re-emit finding text.\n\nStructured output only.',
-  { label: 'synthesize', phase: 'Synthesize', agentType: 'review-synthesizer', schema: REPORT_SCHEMA, ...(P.effort ? { effort: P.effort } : {}) }
+  { label: 'synthesize', phase: 'Synthesize', agentType: 'review-synthesizer', schema: REPORT_SCHEMA, ...effortOpts() }
 )
 
 // Assembler invariants:

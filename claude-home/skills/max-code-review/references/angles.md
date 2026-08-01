@@ -187,6 +187,11 @@ changed files no candidate has been raised against. Those come first, because a
 changed file with zero candidates is usually a file nobody opened. Only then work
 the list of things the first pass tends to miss.
 
+The sweep runs **concurrently with verification** and is **sharded** across
+several sweepers, each owning a disjoint slice of the uncovered files. So the
+"already found" list a sweeper sees is mostly candidates *pending* a verdict, and
+each sweeper is told which files its siblings own.
+
 What the first pass tends to miss (quoted verbatim into the sweep prompt — keep
 this block byte-identical to `SWEEP_GAP_FOCUS` in the workflow, no blockquote
 markers):
