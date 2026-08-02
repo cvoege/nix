@@ -112,7 +112,10 @@ in
     ".claude/CLAUDE.md" = { source = ./agent-shared/AGENTS.md; };
     ".pi/agent/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
     ".pi/agent/settings-base.json" = { source = ./pi-home/settings-base.json; };
-    ".pi/agent/skills" = { source = ./pi-home/skills; recursive = true; };
+    ".pi/agent/skills" = { source = ./agent-nonclaude-shared/skills; recursive = true; };
+    ".pi/agent/agents" = { source = ./agent-nonclaude-shared/agents; recursive = true; };
+    ".config/opencode/skills" = { source = ./agent-nonclaude-shared/skills; recursive = true; };
+    ".config/opencode/agents" = { source = ./agent-nonclaude-shared/agents; recursive = true; };
     ".config/opencode/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
