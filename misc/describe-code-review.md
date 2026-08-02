@@ -1,4 +1,4 @@
-Write as much output as you can from this review (including output from the individual agents, organized in folders) to a folder called (name of the code review skill I had you run)-(effort level) in this repo. Write down meticulous notes not just on the findings but for each agent:
+Write as much output as you can from this review (including output from the individual agents, organized in folders) to a folder in `~/Documents/get-ranges-values-reviews` named after the effort level of the review (e.g. `~/Documents/get-ranges-values-reviews/max`). Write down meticulous notes not just on the findings but for each agent:
 
 1. What its original prompt was
 2. What it was asked to do
