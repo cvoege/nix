@@ -172,9 +172,10 @@ ct_install() {
 # doesn't exist yet.
 
 # @cmd    Open a worktree on a branch (new or existing)
+# @alias start
 # @option -b --base <BRANCH>  base a new branch on this instead of trunk
 # @arg    branch!             branch to open
-start() {
+create() {
   local branch="$argc_branch" base="${argc_base:-}"
   local main_root trunk worktree
 
@@ -461,7 +462,7 @@ clean() {
 }
 
 # The one command that stays a wrapper: ct_install has a second caller (the end
-# of a successful `start`), and naming the function `install` outright would
+# of a successful `create`), and naming the function `install` outright would
 # shadow install(1) for the rest of this script.
 
 # @cmd Prepare the current worktree (deps + configs)
