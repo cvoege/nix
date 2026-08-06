@@ -28,6 +28,16 @@ _cw_window_name() {
 }
 
 
+# _cw_pin_window_dir <window_id> <dir>
+# Record <dir> as the window's split directory. `new-window -c` only sets the
+# FIRST pane's directory; a later `split-window` with no -c uses the session's
+# working directory, not the window's or the pane's. The split key bindings read
+# this window-scoped user option (see programs.tmux in home.nix) so every pane
+# in a cw window lands in the worktree — and windows without it are untouched.
+_cw_pin_window_dir() {
+  tmux set-option -w -t "$1" @cw_dir "$2"
+}
+
 _get_agent_basic_cmd() {
   local prompt="$1" cmd
   if [ "$CW_AGENT" = "claude" ] ; then
@@ -86,6 +96,7 @@ create() {
   # second pane handles setup.
   local win_id cmd
   win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
+  _cw_pin_window_dir "$win_id" "$worktree"
   cmd="$(_get_agent_basic_cmd "$prompt")"
   tmux send-keys -t "$win_id.0" "$cmd" Enter
   tmux split-window -d -v -t "$win_id" -c "$worktree"
@@ -155,6 +166,7 @@ oneshot() {
 
   local win_id
   win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
+  _cw_pin_window_dir "$win_id" "$worktree"
   tmux send-keys -t "$win_id.0" \
     "$(printf 'cw __oneshot %q %q %q' "$branch" "$prompt" "$log")" Enter
 }

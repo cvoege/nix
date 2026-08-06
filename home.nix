@@ -206,8 +206,11 @@ in
       bind -n M-l select-pane -R
 
       # split panes using | and -
-      bind | split-window -h
-      bind - split-window -v
+      # A window with @cw_dir set (see bin/cw) splits into that directory; every
+      # other window keeps tmux's default (the session's working directory),
+      # since an empty -c is the same as passing no -c at all.
+      bind | split-window -h -c "#{?#{==:#{@cw_dir},},,#{@cw_dir}}"
+      bind - split-window -v -c "#{?#{==:#{@cw_dir},},,#{@cw_dir}}"
       unbind '"'
       unbind %
 
