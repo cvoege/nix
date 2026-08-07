@@ -201,7 +201,7 @@ __oneshot() {
 review() {
   local branch="${argc_branch:-}"
   local effort="${argc_effort:-max}"
-  cw create --prompt "/code-review $effort --comment" --background "$branch"
+  cw create --prompt "/code-review $effort ; Print the findings in an easily readable format, with line numbers and suggested fixes." --background "$branch"
 }
 
 # @cmd Perform a code review of the given branch.
