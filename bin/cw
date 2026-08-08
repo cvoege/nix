@@ -167,46 +167,68 @@ create() {
 }
 
 
+# _cw_close_workspace <worktree> <force> <remove>
+# Release <worktree> via `ct close`, then close its multiplexer tab/window.
+# <force> and <remove> are the literal flags ("--force"/"--remove") or empty,
+# same convention as `ct close` itself. Shared by `closex` and `close-all`.
+_cw_close_workspace() {
+  local worktree="$1" force="$2" remove="$3"
+  ct close "$worktree" $force $remove
+
+  local win_id tab_id
+  if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
+    # TODO: Tmux find window
+    # tmux kill-window -t "$win_id"
+    echo "cw: closing the multiplexer window isn't implemented yet for tmux" >&2
+    return 1
+  elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
+    # Match on the pane's cwd rather than the tab label: the label is a
+    # transformed version of the branch name (see _cw_window_name) and may
+    # be further mangled by herdr, but the worktree path is exact and known.
+    tab_id="$(herdr pane list | jq -re --arg cwd "$worktree" \
+      '.result.panes[] | select(.cwd == $cwd) | .tab_id' | head -1)"
+    if [ -z "$tab_id" ]; then
+      echo "cw: no herdr tab found for worktree $worktree" >&2
+      return 1
+    fi
+    herdr tab close "$tab_id"
+  else
+    echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
+    return 1
+  fi
+}
+
 # @cmd Tears down the current cw window and releases its worktree.
 # @flag  -f --force   discard uncommitted and untracked changes
 # @flag  -r --remove  delete the worktree instead of parking it for reuse
 # @arg   spaces*      list of workpsaces to delete
 closex() {
-  local remove=""
+  local remove="" force=""
   [ -n "${argc_remove:-}" ] && remove="--remove"
-  local force=""
   [ -n "${argc_force:-}" ] && force="--force"
 
-  local main_root
-  main_root="$(ct main_root)"
-
+  local space worktree
   for space in "${argc_spaces[@]}" ; do
     echo "$space"
     worktree="$(ct resolve "$space")"
-    ct close "$worktree" $force $remove
-
-    local win_id tab_id
-    if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
-      # TODO: Tmux find window
-      # tmux kill-window -t "$win_id"
-      echo "closex not implemented yet for tmux" >&2
-      return 1
-    elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
-      # Match on the pane's cwd rather than the tab label: the label is a
-      # transformed version of the branch name (see _cw_window_name) and may
-      # be further mangled by herdr, but the worktree path is exact and known.
-      tab_id="$(herdr pane list | jq -re --arg cwd "$worktree" \
-        '.result.panes[] | select(.cwd == $cwd) | .tab_id' | head -1)"
-      if [ -z "$tab_id" ]; then
-        echo "cw: no herdr tab found for worktree $worktree" >&2
-        continue
-      fi
-      herdr tab close "$tab_id"
-    else
-      echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
-      return 1
-    fi
+    _cw_close_workspace "$worktree" "$force" "$remove"
   done
+}
+
+# @cmd Closes every open cw workspace for the current repo.
+# @flag  -f --force   discard uncommitted and untracked changes
+# @flag  -r --remove  delete the worktrees instead of parking them for reuse
+close-all() {
+  local remove="" force=""
+  [ -n "${argc_remove:-}" ] && remove="--remove"
+  [ -n "${argc_force:-}" ] && force="--force"
+
+  local worktree
+  while IFS= read -r worktree; do
+    [ -n "$worktree" ] || continue
+    echo "$worktree"
+    _cw_close_workspace "$worktree" "$force" "$remove"
+  done < <(ct list-busy)
 }
 
 # @cmd Tears down the current cw window and releases its worktree.

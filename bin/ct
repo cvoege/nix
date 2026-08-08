@@ -139,6 +139,28 @@ _ct_list_parked() {
   '
 }
 
+# _ct_list_busy
+# Echo the path of every busy pool worktree, one per line: the complement of
+# _ct_list_parked — a pool worktree checked out on anything other than its own
+# marker branch (real work, or mid-operation).
+_ct_list_busy() {
+  local base
+  base="$(_ct_pool_base)" || return 1
+  git worktree list --porcelain | awk -v base="$base" '
+    function flush() {
+      if (path != "" && branch != "") {
+        n = split(path, parts, "/"); leaf = parts[n]
+        if (leaf ~ /^ct-worktree-[0-9]+$/ && index(path, base "/") == 1 &&
+            branch != "refs/heads/" leaf "-parked") print path
+      }
+      path = ""; branch = ""
+    }
+    /^worktree / { flush(); path = substr($0, 10) }
+    /^branch /   { branch = substr($0, 8) }
+    END          { flush() }
+  '
+}
+
 # _ct_park_worktree <worktree> <trunk>
 # Put a worktree into the parked state: on its marker branch, at trunk. `switch
 # -C` creates or resets the branch, so this is idempotent.
@@ -809,6 +831,12 @@ worktree_for_branch() {
 resolve() {
   local target="${argc_target:-}"
   _ct_resolve_target "$target"
+}
+
+# @cmd List busy (non-parked) pool worktree paths for this repo, one per line
+list-busy() {
+  _noargs list-busy "$@"
+  _ct_list_busy
 }
 
 eval "$(argc --argc-eval "$0" "$@")"
