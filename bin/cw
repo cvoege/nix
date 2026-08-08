@@ -41,6 +41,25 @@ _cw_pin_window_dir_tmux() {
   tmux set-option -w -t "$1" @cw_dir "$2"
 }
 
+# _cw_retry <attempts> <delay_seconds> <cmd> [args…]
+# Run <cmd> until it succeeds, up to <attempts> times, sleeping <delay> between
+# tries. Returns the last exit status if every attempt fails.
+_cw_retry() {
+  local attempts="$1" delay="$2"; shift 2
+  local i=1 status=0
+  while :; do
+    if "$@"; then return 0; fi
+    status=$?
+    if [ "$i" -ge "$attempts" ]; then
+      echo "cw: '$*' failed after $attempts attempt(s)" >&2
+      return "$status"
+    fi
+    echo "cw: '$*' failed (attempt $i/$attempts); retrying in ${delay}s" >&2
+    i=$((i + 1))
+    sleep "$delay"
+  done
+}
+
 _get_agent_basic_cmd() {
   local prompt="$1" cmd
   if [ "$CW_AGENT" = "claude" ] ; then
@@ -129,7 +148,7 @@ create() {
     tab_id="$(echo "$tab_create_output" | jq -re .result.tab.tab_id)"
     top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
 
-    herdr agent start "$window" --kind "$CW_AGENT" --pane "$top_pane_id"
+    _cw_retry 5 1 herdr agent start "$window" --kind "$CW_AGENT" --pane "$top_pane_id" || return 1
     if [ -n "$prompt" ] ; then
       herdr agent prompt "$window" "$prompt"
     fi
