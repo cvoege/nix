@@ -145,7 +145,8 @@ _ct_list_parked() {
 _ct_park_worktree() {
   local wt="$1" trunk="$2" parked
   parked="$(_ct_parked_branch "$wt")" || return 1
-  git -C "$wt" switch --quiet -C "$parked" "$trunk" || return 1
+  git -C "$wt" switch --quiet --discard-changes -C "$parked" "$trunk" || return 1
+  git -C "$wt" clean --quiet -fd || return 1
   _ct_clear_claim "$wt"
 }
 
@@ -206,6 +207,12 @@ _ct_claim() {
   if _ct_worktree_busy "$wt"; then return 1; fi
   sha="$(git rev-parse --verify --quiet "refs/heads/$parked")" || return 1
   git update-ref -d "refs/heads/$parked" "$sha" 2>/dev/null || return 1
+  # Deleting the ref left HEAD naming a branch that no longer exists (unborn
+  # HEAD), where every tracked file reads as a staged addition and the next
+  # checkout tries to carry them into the target branch. Re-point HEAD straight
+  # at the same commit instead: pure ref surgery, index and working tree already
+  # match it exactly, so the worktree reads clean and detached.
+  git -C "$wt" update-ref --no-deref HEAD "$sha" || return 1
   if f="$(_ct_claim_file "$wt")"; then echo $$ > "$f"; fi
   return 0
 }
@@ -269,23 +276,54 @@ _ct_keep_claim() {
   _ct_clear_claim "$wt"
 }
 
+# _ct_list_pool_worktrees
+# Echo the path of every registered worktree that belongs to this repo's pool
+# (leaf ct-worktree-N under the pool base), whatever state it's in.
+_ct_list_pool_worktrees() {
+  local base path
+  base="$(_ct_pool_base)" || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path/" in "$base"/*) ;; *) continue ;; esac
+    _ct_is_ct_worktree "$path" && echo "$path"
+  done < <(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}')
+}
+
 # _ct_repair_stranded <trunk>
-# Re-park pool worktrees left checked out on a marker branch that no longer
-# exists. That state means a `ct create` died between claiming the worktree and
-# checking out its branch, and it is otherwise permanent: HEAD is unborn, so
-# every tracked file reads as a staged addition, which makes the worktree look
-# too dirty to claim and too dirty for `git worktree remove`. Worktrees whose
-# claim is still held by a running ct are left alone — that create is mid-fetch,
-# not dead. Anything with a real git operation in progress is left alone too.
+# Re-park pool worktrees a dead `ct create` left mid-claim. A claim deletes the
+# marker branch and detaches HEAD, so between then and the checkout of the real
+# branch the worktree belongs to the pool but doesn't look parked. Two shapes
+# are recoverable:
+#   * HEAD still names the (now deleted) marker branch — an unborn HEAD, where
+#     every tracked file reads as a staged addition. Nothing but an interrupted
+#     ct produces that, so it's repaired unconditionally.
+#   * HEAD detached with a claim file whose owner pid is gone. The claim file is
+#     what makes this safe: a detached worktree with no claim is somebody's
+#     `git checkout <sha>` or bisect, and is left strictly alone.
+# Worktrees on a real branch are real work — those only get a stale claim file
+# cleared. Anything mid-operation, or still claimed by a live ct, is untouched.
 _ct_repair_stranded() {
-  local trunk="$1" path parked leaf
+  local trunk="$1" path parked leaf head_ref claim
   [ -n "$trunk" ] || return 0
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     parked="$(_ct_parked_branch "$path")" || continue
-    if git show-ref --verify --quiet "refs/heads/$parked"; then continue; fi
-    if _ct_claim_held "$path"; then continue; fi
-    if _ct_op_in_progress "$path"; then continue; fi
+    git show-ref --verify --quiet "refs/heads/$parked" && continue   # genuinely parked
+    _ct_claim_held "$path" && continue                               # a live ct owns it
+    _ct_op_in_progress "$path" && continue                           # rebase/bisect/...
+
+    head_ref="$(git -C "$path" symbolic-ref --quiet HEAD || true)"
+    if [ -n "$head_ref" ] && [ "$head_ref" != "refs/heads/$parked" ]; then
+      # On some other branch: real work. Only the claim record is stale.
+      _ct_clear_claim "$path"
+      continue
+    fi
+    if [ -z "$head_ref" ]; then
+      # Detached. Only ours to reclaim when a dead claim says a ct left it here.
+      claim="$(_ct_claim_file "$path" 2>/dev/null || true)"
+      [ -n "$claim" ] && [ -f "$claim" ] || continue
+    fi
+
     leaf="$(_ct_get_path_leaf "$path")"
     if _ct_park_worktree "$path" "$trunk"; then
       echo "ct: repaired $leaf (an interrupted ct create left it mid-claim)"
@@ -293,7 +331,7 @@ _ct_repair_stranded() {
       echo "ct: could not repair $leaf; it holds changes that don't match $trunk." >&2
       echo "  Inspect it, then run: git -C '$path' switch -C $parked $trunk" >&2
     fi
-  done < <(_ct_list_parked)
+  done < <(_ct_list_pool_worktrees)
 }
 
 # _ct_find_parked
@@ -499,13 +537,13 @@ create() {
           { _ct_end_claim; return 1; }
       fi
     fi
-    git -C "$worktree" switch "$branch" || { _ct_end_claim; return 1; }
+    git -C "$worktree" switch --discard-changes "$branch" || { _ct_end_claim; return 1; }
   else
     # New branch, based on --base (or the latest trunk) and recorded as stacked
     # on it so `git stack` sees it. The ref check keeps the parent step from
     # failing the whole open when trunk has no local branch — git-stack only
     # accepts a local branch as a parent.
-    git -C "$worktree" switch -c "$branch" "$base_ref" ||
+    git -C "$worktree" switch --discard-changes -c "$branch" "$base_ref" ||
       { _ct_end_claim; return 1; }
     if git show-ref --verify --quiet "refs/heads/$base_ref"; then
       git -C "$worktree" stack parent "$base_ref" || { _ct_end_claim; return 1; }
