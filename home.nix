@@ -336,8 +336,13 @@ in
 
       if test -d $HOME/.config/nvm ; then
         export NVM_DIR="$HOME/.config/nvm"
+        # nvm.sh ends with `hash -r`, which fails loudly under the `set +h`
+        # above ("bash: hash: hashing disabled"). Turn hashing back on just for
+        # the load, then disable it again.
+        set -h
         [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
         [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+        set +h
       fi
 
       git_main_branch() {
