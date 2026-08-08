@@ -16,16 +16,17 @@ if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
 fi
 
 # _cw_window_name <branch>
-# Echo the tmux window name for <branch>: the branch name itself, except that
-# branches shaped like colton/act-123-whatever collapse to the ticket id
-# (ACT-123). One-shot log filenames are derived from this too, which is how
-# `cw wait <branch>` finds the log of a run it didn't start.
+# Echo the tmux window name for <branch>: the branch name lowercased with
+# slashes turned into dashes, except that branches shaped like
+# colton/act-123-whatever collapse to the ticket id (ACT-123). One-shot log
+# filenames are derived from this too, which is how `cw wait <branch>` finds
+# the log of a run it didn't start.
 _cw_window_name() {
   local branch="$1"
   if [[ "$branch" =~ ^[a-z]+/([a-z]+-[0-9]+)-.* ]]; then
-    echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]'
+    echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]' | tr '/' '-'
   else
-    echo "$branch"
+    echo "$branch" | tr '[:upper:]' '[:lower:]' | tr '/' '-'
   fi
 }
 
