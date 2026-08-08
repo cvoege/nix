@@ -143,6 +143,7 @@ in
     ".config/opencode/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
     ".config/herdr/config.toml" = { source = ./herdr/config.toml; };
     ".config/ghostty/config" = { source = ./ghostty/config; };
+    ".config/nvim" = { source = ./nvim/config; recursive = true; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
