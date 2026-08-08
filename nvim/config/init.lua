@@ -25,6 +25,16 @@ vim.opt.smartcase = true      -- ...unless you type a capital letter
 vim.opt.termguicolors = true  -- enable full color support (needed for good themes)
 vim.opt.signcolumn = "yes"    -- always show the sign column (avoids text shifting when LSP diagnostics appear)
 
+vim.g.mapleader = " "
+
+vim.diagnostic.config({
+  virtual_text = true,        -- inline text showing the error message
+  signs = true,                -- icons in the sign column
+  underline = true,            -- underline the problematic text
+  update_in_insert = false,    -- don't spam updates while typing
+  severity_sort = true,        -- show most severe issues first
+})
+
 -- Plugin setup
 require("lazy").setup({
   -- plugins will go here
@@ -46,12 +56,14 @@ require("lazy").setup({
     end,
   },
 
-  { "williamboman/mason.nvim", config = true },
+  { import = "plugins" }, -- pulls in every file under lua/plugins/
 
-  {
-    "williamboman/mason-lspconfig.nvim",
-    dependencies = { "williamboman/mason.nvim" },
-  },
+  -- { "williamboman/mason.nvim", config = true },
 
-  { "neovim/nvim-lspconfig" },
+  -- {
+  --   "williamboman/mason-lspconfig.nvim",
+  --   dependencies = { "williamboman/mason.nvim" },
+  -- },
+
+  -- { "neovim/nvim-lspconfig" },
 })

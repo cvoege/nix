@@ -85,7 +85,7 @@ in
     pkgs.nix-index
     pkgs.nix-info
     pkgs.nixpkgs-fmt
-    # pkgs.nodejs_24
+    pkgs.nodejs_24
     pkgs.yarn
     pkgs.ncdu
     pkgs.gnupg
