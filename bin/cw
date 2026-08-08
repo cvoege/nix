@@ -185,23 +185,28 @@ closex() {
     worktree="$(ct resolve "$space")"
     ct close "$worktree" $force $remove
 
-    local win_id
+    local win_id tab_id
     if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
       # TODO: Tmux find window
       # tmux kill-window -t "$win_id"
       echo "closex not implemented yet for tmux" >&2
       return 1
     elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
-      # TODO: more methods for dicovering tabs?
-      tab_id="$(herdr tab list | jq -re ".result.tabs | .[] | select(.label == \"$space\") | .tab_id")"
+      # Match on the pane's cwd rather than the tab label: the label is a
+      # transformed version of the branch name (see _cw_window_name) and may
+      # be further mangled by herdr, but the worktree path is exact and known.
+      tab_id="$(herdr pane list | jq -re --arg cwd "$worktree" \
+        '.result.panes[] | select(.cwd == $cwd) | .tab_id' | head -1)"
+      if [ -z "$tab_id" ]; then
+        echo "cw: no herdr tab found for worktree $worktree" >&2
+        continue
+      fi
       herdr tab close "$tab_id"
     else
       echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
       return 1
     fi
   done
-
-
 }
 
 # @cmd Tears down the current cw window and releases its worktree.
