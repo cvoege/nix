@@ -102,6 +102,7 @@ in
     # pkgs.mongodb-tools
     # pkgs.ruby
     pkgs.devenv
+    pkgs.go
     # pkgs.claude-code
     pkgs.opentofu
     pkgs.bun

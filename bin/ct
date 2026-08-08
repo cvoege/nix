@@ -58,6 +58,18 @@ _ct_main_root() {
 # marker ref (`git update-ref -d <ref> <old-sha>`), so exactly one of two
 # concurrent `ct create`s can win a given worktree. Marker branches are local
 # only and are deleted along with their worktree.
+#
+# Deleting the ref leaves HEAD naming a branch that no longer exists — an unborn
+# HEAD, where git reports every tracked file as a staged addition — until the
+# claimer checks out the real branch. That window is short but it spans a fetch,
+# and a create that dies inside it (Ctrl-C, a closed pane, SIGTERM) used to
+# strand the worktree there for good: it looks parked, but it's too "dirty" to
+# claim and too dirty for `git worktree remove`, so it leaks out of the pool.
+# Two things close that hole: create traps signals and returns its claim to the
+# pool (_ct_guard_claim), and for deaths no trap can catch (SIGKILL, a crash)
+# _ct_repair_stranded re-parks the leftovers on the next create or clean. A
+# claim records the owning pid in the worktree's git dir so the repair pass can
+# tell a create that is still working from one that died.
 
 # _ct_pool_base
 # Echo the worktree pool base dir (<repo_parent>/<repo_name>-worktrees),
@@ -80,16 +92,26 @@ _ct_parked_branch() {
   echo "$leaf-parked"
 }
 
-# _ct_worktree_busy <path>
-# True when a worktree must not be touched: a git operation is mid-flight, or
-# it holds uncommitted work. Parked worktrees are clean by construction, so
-# either condition means something unexpected is going on and we leave it be.
-_ct_worktree_busy() {
+# _ct_op_in_progress <path>
+# True when a git operation is mid-flight in a worktree (rebase, merge,
+# cherry-pick, revert, bisect). An unreadable git dir counts as in-progress: we
+# know nothing about the worktree, so the safe answer is "don't touch it".
+_ct_op_in_progress() {
   local wt="$1" gitdir f
   gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
   for f in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
     [ -e "$gitdir/$f" ] && return 0
   done
+  return 1
+}
+
+# _ct_worktree_busy <path>
+# True when a worktree must not be touched: a git operation is mid-flight, or
+# it holds uncommitted work. Parked worktrees are clean by construction, so
+# either condition means something unexpected is going on and we leave it be.
+_ct_worktree_busy() {
+  local wt="$1"
+  if _ct_op_in_progress "$wt"; then return 0; fi
   [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] && return 0
   return 1
 }
@@ -123,7 +145,8 @@ _ct_list_parked() {
 _ct_park_worktree() {
   local wt="$1" trunk="$2" parked
   parked="$(_ct_parked_branch "$wt")" || return 1
-  git -C "$wt" switch --quiet -C "$parked" "$trunk"
+  git -C "$wt" switch --quiet -C "$parked" "$trunk" || return 1
+  _ct_clear_claim "$wt"
 }
 
 # _ct_delete_parked_branch <main_root> <worktree>
@@ -138,17 +161,53 @@ _ct_delete_parked_branch() {
 }
 
 
+# _ct_claim_file <worktree>
+# Echo the path where a claim records its owner's pid, in the worktree's own git
+# dir (not the working tree, so it can never show up as a change).
+_ct_claim_file() {
+  local gitdir
+  gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  echo "$gitdir/ct-claim"
+}
+
+# _ct_clear_claim <worktree>
+# Drop the claim record. Always succeeds: a worktree with no claim is the normal
+# case, and callers use this as their last statement.
+_ct_clear_claim() {
+  local f
+  f="$(_ct_claim_file "$1")" || return 0
+  rm -f "$f"
+  return 0
+}
+
+# _ct_claim_held <worktree>
+# True while a live ct still owns the claim on <worktree>. A missing file, or a
+# pid that no longer exists, means the owner died mid-claim — that's the only
+# case _ct_repair_stranded is allowed to clean up after.
+_ct_claim_held() {
+  local f pid
+  f="$(_ct_claim_file "$1")" || return 1
+  [ -f "$f" ] || return 1
+  pid="$(cat "$f" 2>/dev/null)" || return 1
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
 # _ct_claim <worktree>
 # Take ownership of a parked worktree, atomically. Deleting the marker ref with
 # its expected old value is a compare-and-swap: two concurrent `ct create`s race
 # on it and exactly one wins, so they can't both switch the same worktree onto
-# different branches. Returns non-zero if the worktree isn't claimable.
+# different branches. The winner records its pid so that, until it checks out
+# the real branch, other cts can tell this worktree is being worked on rather
+# than abandoned. Returns non-zero if the worktree isn't claimable.
 _ct_claim() {
-  local wt="$1" parked sha
+  local wt="$1" parked sha f
   parked="$(_ct_parked_branch "$wt")" || return 1
   if _ct_worktree_busy "$wt"; then return 1; fi
   sha="$(git rev-parse --verify --quiet "refs/heads/$parked")" || return 1
-  git update-ref -d "refs/heads/$parked" "$sha" 2>/dev/null
+  git update-ref -d "refs/heads/$parked" "$sha" 2>/dev/null || return 1
+  if f="$(_ct_claim_file "$wt")"; then echo $$ > "$f"; fi
+  return 0
 }
 
 # _ct_unclaim <worktree> <trunk>
@@ -158,6 +217,83 @@ _ct_claim() {
 _ct_unclaim() {
   _ct_park_worktree "$1" "$2" ||
     echo "ct: could not return '$1' to the pool; run: ct park '$1'" >&2
+}
+
+# A create holds at most one claim at a time; these track it so the traps
+# installed by _ct_guard_claim can hand it back if we're killed mid-create.
+_ct_claimed=""
+_ct_claimed_trunk=""
+
+# _ct_guard_claim <worktree> <trunk>
+# Take responsibility for a fresh claim. From here until _ct_end_claim or
+# _ct_keep_claim, dying returns the worktree to the pool instead of stranding it
+# on a marker branch that no longer exists. The signal traps re-raise after
+# cleaning up so ct still dies with the right status.
+_ct_guard_claim() {
+  _ct_claimed="$1"
+  _ct_claimed_trunk="$2"
+  local sig
+  for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064  # $sig must expand now: it's the loop variable
+    trap "_ct_on_signal $sig" "$sig"
+  done
+  trap _ct_end_claim EXIT
+}
+
+# _ct_on_signal <sig>
+# Hand the claim back, then die the way we were asked to, so callers still see
+# a signal death rather than a plain non-zero exit.
+_ct_on_signal() {
+  _ct_end_claim
+  trap - "$1"
+  kill "-$1" $$
+}
+
+# _ct_end_claim
+# Give the claimed worktree back to the pool. Idempotent, and a no-op when there
+# is nothing claimed, so it's safe as both an error path and an EXIT trap.
+_ct_end_claim() {
+  local wt="$_ct_claimed"
+  _ct_claimed=""
+  [ -n "$wt" ] || return 0
+  _ct_unclaim "$wt" "$_ct_claimed_trunk"
+}
+
+# _ct_keep_claim
+# Release the guard without parking: the worktree is on its real branch now, so
+# it's busy by definition and no longer ours to hand back.
+_ct_keep_claim() {
+  local wt="$_ct_claimed"
+  _ct_claimed=""
+  [ -n "$wt" ] || return 0
+  _ct_clear_claim "$wt"
+}
+
+# _ct_repair_stranded <trunk>
+# Re-park pool worktrees left checked out on a marker branch that no longer
+# exists. That state means a `ct create` died between claiming the worktree and
+# checking out its branch, and it is otherwise permanent: HEAD is unborn, so
+# every tracked file reads as a staged addition, which makes the worktree look
+# too dirty to claim and too dirty for `git worktree remove`. Worktrees whose
+# claim is still held by a running ct are left alone — that create is mid-fetch,
+# not dead. Anything with a real git operation in progress is left alone too.
+_ct_repair_stranded() {
+  local trunk="$1" path parked leaf
+  [ -n "$trunk" ] || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    parked="$(_ct_parked_branch "$path")" || continue
+    if git show-ref --verify --quiet "refs/heads/$parked"; then continue; fi
+    if _ct_claim_held "$path"; then continue; fi
+    if _ct_op_in_progress "$path"; then continue; fi
+    leaf="$(_ct_get_path_leaf "$path")"
+    if _ct_park_worktree "$path" "$trunk"; then
+      echo "ct: repaired $leaf (an interrupted ct create left it mid-claim)"
+    else
+      echo "ct: could not repair $leaf; it holds changes that don't match $trunk." >&2
+      echo "  Inspect it, then run: git -C '$path' switch -C $parked $trunk" >&2
+    fi
+  done < <(_ct_list_parked)
 }
 
 # _ct_find_parked
@@ -316,6 +452,11 @@ create() {
     base_ref="$base"
   fi
 
+  # Return any worktree a killed create abandoned mid-claim to the pool before
+  # looking for one, so the pool heals itself instead of leaking a worktree per
+  # interrupted create.
+  _ct_repair_stranded "$trunk"
+
   # Acquire a worktree from the pool: claim a parked one if any, otherwise add a
   # fresh ct-worktree-N. A new worktree is born parked and then claimed through
   # the same compare-and-swap, so a concurrent `ct create` can't grab it in the
@@ -343,8 +484,11 @@ create() {
   # fails — same "can't open a branch twice" behavior as before.
   #
   # The worktree is claimed from here on: its marker branch is gone, so nothing
-  # else can take it, and every failure path has to park it again or it leaks
-  # out of the pool for good.
+  # else can take it, and it is on an unborn HEAD until the switch below lands.
+  # Every way out of that window — an error, a signal, or plain success — has to
+  # go through _ct_end_claim or _ct_keep_claim, or the worktree leaks out of the
+  # pool for good. The guard's traps cover the ways out we don't write.
+  _ct_guard_claim "$worktree" "$trunk"
   if [ "$exists" -eq 1 ]; then
     if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
       if git show-ref --verify --quiet "refs/heads/$branch"; then
@@ -352,21 +496,22 @@ create() {
           echo "ct: could not fast-forward '$branch' to origin/$branch; using the local branch" >&2
       else
         git branch --quiet --track "$branch" "origin/$branch" ||
-          { _ct_unclaim "$worktree" "$trunk"; return 1; }
+          { _ct_end_claim; return 1; }
       fi
     fi
-    git -C "$worktree" switch "$branch" || { _ct_unclaim "$worktree" "$trunk"; return 1; }
+    git -C "$worktree" switch "$branch" || { _ct_end_claim; return 1; }
   else
     # New branch, based on --base (or the latest trunk) and recorded as stacked
     # on it so `git stack` sees it. The ref check keeps the parent step from
     # failing the whole open when trunk has no local branch — git-stack only
     # accepts a local branch as a parent.
     git -C "$worktree" switch -c "$branch" "$base_ref" ||
-      { _ct_unclaim "$worktree" "$trunk"; return 1; }
+      { _ct_end_claim; return 1; }
     if git show-ref --verify --quiet "refs/heads/$base_ref"; then
-      git -C "$worktree" stack parent "$base_ref" || return 1
+      git -C "$worktree" stack parent "$base_ref" || { _ct_end_claim; return 1; }
     fi
   fi
+  _ct_keep_claim
 
   echo "Worktree created: $worktree"
   cd "$worktree"
@@ -456,16 +601,10 @@ _ct_release_check() {
   # advice for it — -f discards uncommitted changes, not an in-flight rebase, so
   # it would fall through to a `git switch` git refuses ("cannot switch branch
   # while rebasing"). Removal doesn't care: the whole worktree is going away.
-  if [ -z "$remove" ] && _ct_is_ct_worktree "$worktree"; then
-    local gitdir f
-    gitdir="$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null)" || gitdir=""
-    for f in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
-      if [ -n "$gitdir" ] && [ -e "$gitdir/$f" ]; then
-        echo "ct: '$worktree' has a git operation in progress; finish or abort it" >&2
-        echo "  (git rebase --abort / git cherry-pick --abort / git bisect reset), or pass -r to remove" >&2
-        return 1
-      fi
-    done
+  if [ -z "$remove" ] && _ct_is_ct_worktree "$worktree" && _ct_op_in_progress "$worktree"; then
+    echo "ct: '$worktree' has a git operation in progress; finish or abort it" >&2
+    echo "  (git rebase --abort / git cherry-pick --abort / git bisect reset), or pass -r to remove" >&2
+    return 1
   fi
 
   # status --porcelain ignores gitignored files, so node_modules et al. don't
@@ -500,9 +639,17 @@ _ct_release() {
   if [ -z "$remove" ] && _ct_is_ct_worktree "$leaf"; then
     trunk="$(git -C "$main_root" stack trunk)"
     if [ -n "$(git -C "$worktree" status --porcelain)" ]; then
-      # Only reachable with force (the check refuses otherwise): discard tracked
-      # changes and untracked files, but keep ignored ones (node_modules) so the
-      # parked worktree stays warm.
+      # Normally only reachable with force, since the check refuses a dirty
+      # worktree — but an agent still running in there can dirty it in between,
+      # and discarding work nobody asked us to discard is not a park. Re-test
+      # rather than trusting the check: with -f, drop tracked changes and
+      # untracked files while keeping ignored ones (node_modules) so the parked
+      # worktree stays warm; without it, stop.
+      if [ -z "$force" ]; then
+        echo "ct: '$worktree' picked up changes since it was checked; not parking it." >&2
+        echo "  Something is still writing to it. Commit them, or pass -f to discard." >&2
+        return 1
+      fi
       git -C "$worktree" reset --hard
       git -C "$worktree" clean -fd
     fi
@@ -574,6 +721,11 @@ clean() {
   main_root="$(_ct_main_root)"
   local force=""
   [ -n "${argc_force:-}" ] && force="--force"
+
+  # Repair first: a worktree stranded mid-claim looks parked but is too dirty
+  # for `git worktree remove`, so without this it would survive every clean.
+  trunk="$(git -C "$main_root" stack trunk 2>/dev/null || true)"
+  _ct_repair_stranded "$trunk"
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
