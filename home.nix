@@ -13,6 +13,27 @@ let
   nameHint = "V as in Victor";
   homePath = builtins.getEnv "HOME";
   username = builtins.getEnv "USER";
+
+  # herdr (https://herdr.dev) isn't in nixpkgs and this config doesn't use
+  # flakes, so it's not installable via the nix method on their install page
+  # (`nix run github:herdrdev/herdr/...`). Instead we grab the prebuilt macOS
+  # release binary directly, pinned by content hash like any other fetchurl.
+  herdrVersion = "0.8.0";
+  herdrSources = {
+    aarch64-darwin = {
+      url = "https://github.com/herdrdev/herdr/releases/download/v${herdrVersion}/herdr-macos-aarch64";
+      sha256 = "0y41cnn89ggz13sws2wrlw5dsnig018vy9r9cdawrpygzj9ryfnm";
+    };
+    x86_64-darwin = {
+      url = "https://github.com/herdrdev/herdr/releases/download/v${herdrVersion}/herdr-macos-x86_64";
+      sha256 = "0jfng2xv1acagw6y5540s0d362f207n79r18pkrsmjlgdkymmjvp";
+    };
+  };
+  herdr = pkgs.runCommand "herdr-${herdrVersion}" { } ''
+    mkdir -p $out/bin
+    cp ${pkgs.fetchurl herdrSources.${pkgs.stdenv.hostPlatform.system}} $out/bin/herdr
+    chmod +x $out/bin/herdr
+  '';
 in
 {
   # Home Manager needs a bit of information about you and the paths it should
@@ -86,6 +107,7 @@ in
     pkgs.bun
     # Declarative CLI argument parsing for ./bin/* (see the `# @cmd` comments).
     pkgs.argc
+    herdr
   ];
 
   # Home Manager is pretty good at managing dotfiles. The primary way to manage
@@ -117,6 +139,8 @@ in
     ".config/opencode/skills" = { source = ./agent-nonclaude-shared/skills; recursive = true; };
     # ".config/opencode/agents" = { source = ./agent-nonclaude-shared/agents; recursive = true; };
     ".config/opencode/AGENTS.md" = { source = ./agent-shared/AGENTS.md; };
+    ".config/herdr/config.toml" = { source = ./herdr/config.toml; };
+    ".config/ghostty/config" = { source = ./ghostty/config; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a

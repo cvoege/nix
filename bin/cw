@@ -4,6 +4,8 @@
 CW_LOG_DIR="${CW_LOG_DIR:-$HOME/.cw/logs}"
 CW_EXIT_PREFIX="cw: oneshot exit "
 CW_AGENT="${CW_AGENT:-claude}"
+# tmux or herdr
+CW_MULTIPLEXER="${CW_MULTIPLEXER:-herdr}"
 
 set -euo pipefail
 
@@ -28,13 +30,13 @@ _cw_window_name() {
 }
 
 
-# _cw_pin_window_dir <window_id> <dir>
+# _cw_pin_window_dir_tmux <window_id> <dir>
 # Record <dir> as the window's split directory. `new-window -c` only sets the
 # FIRST pane's directory; a later `split-window` with no -c uses the session's
 # working directory, not the window's or the pane's. The split key bindings read
 # this window-scoped user option (see programs.tmux in home.nix) so every pane
 # in a cw window lands in the worktree — and windows without it are untouched.
-_cw_pin_window_dir() {
+_cw_pin_window_dir_tmux() {
   tmux set-option -w -t "$1" @cw_dir "$2"
 }
 
@@ -52,7 +54,6 @@ _get_agent_basic_cmd() {
     echo "Invalid agent $CW_AGENT" >&2
   fi
 }
-
 _run_agent_oneshot() {
   local prompt="$1"
   if [ "$CW_AGENT" = "claude" ] ; then
@@ -63,6 +64,20 @@ _run_agent_oneshot() {
     echo "Invalid agent $CW_AGENT" >&2
   fi
 }
+
+# MAX_HERDR_PANE_RETRIES="20"
+
+# _wait_for_herdr_pane() {
+#   local pane_id="$1" i=0
+#   until herdr pane get "$pane_id" | jq .result.pane.pane_id ; do
+#     i=$((i+1))
+#     if [ "$i" -gt "$MAX_HERDR_PANE_RETRIES" ] ; then
+#       echo "herdr pane '$pane_id' did not start." >&2
+#       return 1
+#     fi
+#     sleep 1
+#   done
+# }
 
 
 # @cmd    Create a workspace.
@@ -91,19 +106,82 @@ create() {
   worktree="$(ct worktree_for_branch "$branch")"
   window="$(_cw_window_name "$branch")"
 
-  # Open a new tmux window with an empty shell, then type the claude command
-  # into it — when claude exits you're back at the shell, so the pane stays. A
-  # second pane handles setup.
-  local win_id cmd
-  win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
-  _cw_pin_window_dir "$win_id" "$worktree"
+  local cmd
   cmd="$(_get_agent_basic_cmd "$prompt")"
-  tmux send-keys -t "$win_id.0" "$cmd" Enter
-  tmux split-window -d -v -t "$win_id" -c "$worktree"
-  tmux send-keys -t "$win_id.1" 'echo "run cw close to park this worktree and close the window"' Enter
-  if [ -z "$background" ] ; then
-    tmux select-window -t "$win_id"
+  if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
+    # Open a new tmux window with an empty shell, then type the claude command
+    # into it — when claude exits you're back at the shell, so the pane stays. A
+    # second pane handles setup.
+    local win_id
+    win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
+    _cw_pin_window_dir_tmux "$win_id" "$worktree"
+    tmux send-keys -t "$win_id.0" "$cmd" Enter
+    tmux split-window -d -v -t "$win_id" -c "$worktree"
+    tmux send-keys -t "$win_id.1" 'echo "run cw close to park this worktree and close the window"' Enter
+    if [ -z "$background" ] ; then
+      tmux select-window -t "$win_id"
+    fi
+  elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
+    local top_pane_id tab_create_output split_output bottom_pane_id tab_id agent_create_output
+    # Create tab
+    tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus)"
+    tab_id="$(echo "$tab_create_output" | jq -re .result.tab.tab_id)"
+    top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
+
+    herdr agent start "$window" --kind "$CW_AGENT" --pane "$top_pane_id"
+    if [ -n "$prompt" ] ; then
+      herdr agent prompt "$window" "$prompt"
+    fi
+
+    split_output="$(herdr pane split "$top_pane_id" --direction down --no-focus)"
+    bottom_pane_id="$(echo "$split_output" | jq -re .result.pane.pane_id)"
+    herdr pane run "$bottom_pane_id" "echo "run cw close to park this worktree and close the window""
+
+    if [ -z "$background" ] ; then
+      herdr tab focus "$tab_id"
+    fi
+  else
+    echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
+    return 1
   fi
+}
+
+
+# @cmd Tears down the current cw window and releases its worktree.
+# @flag  -f --force   discard uncommitted and untracked changes
+# @flag  -r --remove  delete the worktree instead of parking it for reuse
+# @arg   spaces*      list of workpsaces to delete
+closex() {
+  local remove=""
+  [ -n "${argc_remove:-}" ] && remove="--remove"
+  local force=""
+  [ -n "${argc_force:-}" ] && force="--force"
+
+  local main_root
+  main_root="$(ct main_root)"
+
+  for space in "${argc_spaces[@]}" ; do
+    echo "$space"
+    worktree="$(ct resolve "$space")"
+    ct close "$worktree" $force $remove
+
+    local win_id
+    if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
+      # TODO: Tmux find window
+      # tmux kill-window -t "$win_id"
+      echo "closex not implemented yet for tmux" >&2
+      return 1
+    elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
+      # TODO: more methods for dicovering tabs?
+      tab_id="$(herdr tab list | jq -re ".result.tabs | .[] | select(.label == \"$space\") | .tab_id")"
+      herdr tab close "$tab_id"
+    else
+      echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
+      return 1
+    fi
+  done
+
+
 }
 
 # @cmd Tears down the current cw window and releases its worktree.
@@ -129,10 +207,17 @@ close() {
 
   ct close "$worktree" $force $remove
 
-  win_id="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{window_id}' 2>/dev/null)"
+  if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
+    win_id="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{window_id}' 2>/dev/null)"
 
-  # Close the tmux window (both panes) if we're inside tmux.
-  [ -n "$win_id" ] && tmux kill-window -t "$win_id"
+    # Close the tmux window (both panes) if we're inside tmux.
+    [ -n "$win_id" ] && tmux kill-window -t "$win_id"
+  elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
+    herdr tab close "$HERDR_TAB_ID"
+  else
+    echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
+    return 1
+  fi
 }
 
 # @cmd    Create a background workspace to do one agentic action and quit.
@@ -164,11 +249,24 @@ oneshot() {
   log="$CW_LOG_DIR/${window//\//-}-$(date +%Y%m%d-%H%M%S).log"
   echo "cw: one-shot logging to $log"
 
-  local win_id
-  win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
-  _cw_pin_window_dir "$win_id" "$worktree"
-  tmux send-keys -t "$win_id.0" \
-    "$(printf 'cw __oneshot %q %q %q' "$branch" "$prompt" "$log")" Enter
+
+  if [ "$CW_MULTIPLEXER" = "tmux" ] ; then
+    local win_id
+    win_id="$(tmux new-window -d -P -F '#{window_id}' -n "$window" -c "$worktree")"
+    _cw_pin_window_dir_tmux "$win_id" "$worktree"
+    tmux send-keys -t "$win_id.0" \
+      "$(printf 'cw __oneshot %q %q %q' "$branch" "$prompt" "$log")" Enter
+  elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
+    local top_pane_id tab_create_output
+    # Create tab
+    tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus)"
+    top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
+
+    herdr pane run "$top_pane_id" "$(printf 'cw __oneshot %q %q %q' "$branch" "$prompt" "$log")"
+  else
+    echo "Invalid multiplexer $CW_MULTIPLEXER" >&2
+    return 1
+  fi
 }
 
 # @cmd Internal, runs inside the one-shot pane created by `cw oneshot`. Runs setup + headless agent, tees all output to the durable log, then tears the worktree/window down.

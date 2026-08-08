@@ -661,4 +661,11 @@ worktree_for_branch() {
   echo "$worktree"
 }
 
+# @cmd Resolve the worktree for a given search string
+# @arg target!    search string
+resolve() {
+  local target="${argc_target:-}"
+  _ct_resolve_target "$target"
+}
+
 eval "$(argc --argc-eval "$0" "$@")"
