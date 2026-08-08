@@ -6,14 +6,14 @@
   "model": "opus[1m]",
   "hooks": {
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ZED_ENVIRONMENT\" ] && [ \"$CLAUDE_CODE_ENTRYPOINT\" != cli ] && exit 0; \"$HOME/.bin/cnotify\" \"Finished responding\" \"Claude Code\""
-          }
-        ]
-      }
+      // {
+      //   "hooks": [
+      //     {
+      //       "type": "command",
+      //       "command": "[ -n \"$ZED_ENVIRONMENT\" ] && [ \"$CLAUDE_CODE_ENTRYPOINT\" != cli ] && exit 0; \"$HOME/.bin/cnotify\" \"Finished responding\" \"Claude Code\""
+      //     }
+      //   ]
+      // }
     ]
   },
   "skipWorkflowUsageWarning": true,
