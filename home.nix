@@ -123,6 +123,11 @@ in
     ".bin/ct" = { source = ./bin/ct; executable = true; };
     ".bin/cnotify" = { source = ./bin/cnotify; executable = true; };
 
+    ".zed_server" = {
+      source = "${pkgs.zed-editor.remote_server}/bin";
+      recursive = true;
+    };
+
     # Claude Code user-level config: subagents, slash commands and skills.
     # See ./claude-home/*; Claude reads these from ~/.claude in every project.
     # recursive = true links each file individually instead of turning the
