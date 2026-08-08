@@ -97,6 +97,7 @@ in
     pkgs.wget
     pkgs.which
     pkgs.zip
+    pkgs.neovim
     # pkgs.codex
     # pkgs.mongodb-cli
     # pkgs.mongodb-tools
@@ -324,7 +325,7 @@ in
       fi
 
       command -v kubectl > /dev/null 2>&1 && complete -F __start_kubectl k
-      command -v zed > /dev/null 2>&1 && export EDITOR="zed --wait"
+      # command -v zed > /dev/null 2>&1 && export EDITOR="zed --wait"
 
       fixcursor() {
         tput cnorm
@@ -466,7 +467,7 @@ in
       };
       advice.addEmptyPathspec = false;
       core = {
-        editor = "zed --wait";
+        # editor = "zed --wait";
         ignoreCase = false;
       };
     };
