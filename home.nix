@@ -123,11 +123,6 @@ in
     ".bin/ct" = { source = ./bin/ct; executable = true; };
     ".bin/cnotify" = { source = ./bin/cnotify; executable = true; };
 
-    # Claude Code user-level config: subagents, slash commands and skills.
-    # See ./claude-home/*; Claude reads these from ~/.claude in every project.
-    # recursive = true links each file individually instead of turning the
-    # directory itself into a store symlink, so ad-hoc unmanaged agents/skills
-    # can still live alongside these (and the dirs stay writable).
     # ".claude/agents" = { source = ./claude-home/agents; recursive = true; };
     # ".claude/commands" = { source = ./claude-home/commands; recursive = true; };
     ".claude/skills" = { source = ./claude-home/skills; recursive = true; };
@@ -144,6 +139,8 @@ in
     ".config/herdr/config.toml" = { source = ./herdr/config.toml; };
     ".config/ghostty/config" = { source = ./ghostty/config; };
     ".config/nvim" = { source = ./nvim/config; recursive = true; };
+
+    ".config/zed/settings.json" = { source = ./zed/settings-base.json; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
