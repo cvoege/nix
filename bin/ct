@@ -117,28 +117,6 @@ _ct_list_parked() {
   '
 }
 
-# _ct_list_detached
-# Echo "<path>\t<HEAD sha>" for every pool worktree in detached HEAD. Only used
-# to find pre-marker-branch worktrees to adopt; see _ct_adopt_parked.
-_ct_list_detached() {
-  local base
-  base="$(_ct_pool_base)" || return 1
-  git worktree list --porcelain | awk -v base="$base" '
-    function flush() {
-      if (path != "" && detached) {
-        n = split(path, parts, "/"); leaf = parts[n]
-        if (leaf ~ /^ct-worktree-[0-9]+$/ && index(path, base "/") == 1)
-          printf "%s\t%s\n", path, head
-      }
-      path = ""; head = ""; detached = 0
-    }
-    /^worktree / { flush(); path = substr($0, 10) }
-    /^HEAD /     { head = substr($0, 6) }
-    /^detached$/ { detached = 1 }
-    END          { flush() }
-  '
-}
-
 # _ct_park_worktree <worktree> <trunk>
 # Put a worktree into the parked state: on its marker branch, at trunk. `switch
 # -C` creates or resets the branch, so this is idempotent.
@@ -159,24 +137,6 @@ _ct_delete_parked_branch() {
     echo "ct: could not delete marker branch '$parked'" >&2
 }
 
-# _ct_adopt_parked <trunk>
-# Migrate worktrees parked by an older ct, which left them in detached HEAD, to
-# the marker branch. Deliberately conservative: only a worktree sitting exactly
-# at trunk — which is what the old park produced — is adopted. A worktree
-# detached anywhere else is someone mid-rebase or inspecting a commit, so it is
-# left alone and simply never enters the pool.
-_ct_adopt_parked() {
-  local trunk="$1" trunk_sha path head
-  trunk_sha="$(git rev-parse --verify --quiet "$trunk^{commit}")" || return 0
-  while IFS=$'\t' read -r path head; do
-    [ -n "$path" ] || continue
-    [ "$head" = "$trunk_sha" ] || continue
-    if _ct_worktree_busy "$path"; then continue; fi
-    if _ct_park_worktree "$path" "$trunk"; then
-      echo "ct: adopted previously parked $(_ct_get_path_leaf "$path")"
-    fi
-  done < <(_ct_list_detached)
-}
 
 # _ct_claim <worktree>
 # Take ownership of a parked worktree, atomically. Deleting the marker ref with
@@ -355,10 +315,6 @@ create() {
     fi
     base_ref="$base"
   fi
-
-  # Bring any worktree parked by an older ct into the pool before looking for
-  # one, so upgrading doesn't strand warm worktrees.
-  _ct_adopt_parked "$trunk"
 
   # Acquire a worktree from the pool: claim a parked one if any, otherwise add a
   # fresh ct-worktree-N. A new worktree is born parked and then claimed through
@@ -612,19 +568,16 @@ park() {
 # anywhere in the repo.
 
 # @cmd Remove all parked (idle) worktrees
+# @flag  -f --force  ignore existing changes
 clean() {
-  _noargs clean "$@"
   local main_root trunk path removed=0
   main_root="$(_ct_main_root)"
-
-  # Sweep worktrees parked by an older ct too, rather than leaving them behind
-  # forever: they're idle by the same definition, just recorded differently.
-  trunk="$(git -C "$main_root" stack trunk 2>/dev/null || true)"
-  [ -n "$trunk" ] && _ct_adopt_parked "$trunk"
+  local force=""
+  [ -n "${argc_force:-}" ] && force="--force"
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if git -C "$main_root" worktree remove "$path"; then
+    if git -C "$main_root" worktree remove "$path" $force ; then
       removed=$(( removed + 1 ))
       _ct_delete_parked_branch "$main_root" "$path"
       echo "ct clean: removed $path"
