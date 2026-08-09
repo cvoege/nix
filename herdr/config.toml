@@ -91,14 +91,14 @@ new_tab = "prefix+c"
 # close_tab = "prefix+shift+x"
 # rename_pane = "prefix+shift+p"
 # edit_scrollback = "prefix+e"
-# focus_pane_left = "alt+j"
-# focus_pane_down = "alt+k"
-# focus_pane_up = "alt+i"
-# focus_pane_right = "alt+l"
-focus_pane_left = "alt+h"
-focus_pane_down = "alt+j"
-focus_pane_up = "alt+k"
+focus_pane_left = "alt+j"
+focus_pane_down = "alt+k"
+focus_pane_up = "alt+i"
 focus_pane_right = "alt+l"
+# focus_pane_left = "alt+h"
+# focus_pane_down = "alt+j"
+# focus_pane_up = "alt+k"
+# focus_pane_right = "alt+l"
 # cycle_pane_next = "prefix+tab"
 # cycle_pane_previous = "prefix+shift+tab"
 # last_pane = ""          # optional, unset by default; bind e.g. "prefix+tab" for global back-and-forth
@@ -265,7 +265,7 @@ delivery = "off"
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]
-# enabled = true
+enabled = false
 # Optional custom mp3 sound files. Relative paths are resolved from this config file's directory.
 # path = "sounds/notification.mp3"   # one mp3 file for all sound notifications
 # done_path = "sounds/done.mp3"      # overrides only finished notifications
