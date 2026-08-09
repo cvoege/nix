@@ -1,6 +1,4 @@
-Write the full output of this review to ~/code/preview-reviews-claude/{effort-level}/.
-
-Folders must be comparable across effort levels: identical metric definitions, identical file names, same section order. I will diff them.
+Inside ~/code/preview-reviews-claude/low/ is a detailed description of how an agentic code review went. It's process, it's findings, etc. This review was of the changes in the branch `colton/preview-environments` compared against `b1` in the repo `/Users/colton/code/monorepo`. Below is a description of the folder structure describing the review:
 
 README.md - Index of every file. Headline numbers table (agents, duration, tokens, tool calls, findings, confirmed-real, line-number accuracy). One-line summary of each finding.
 summary.json - Machine-readable version of the headline numbers, for cross-level diffing. Same keys in every folder, null where unavailable.
@@ -11,8 +9,6 @@ agents/
 misc/ - Anything else you think would be useful.
   raw/ - verbatim copies of the transcript, agent metadata, and the exact input the agent reviewed. Do not edit these. The verbatim effort-level prompt, annotated with which constraints held and which were violated. What the reviewed change does, file-by-file scope, and the risk surface this effort level did NOT examine. Source context around each finding at CORRECT line numbers. Full timeline, agent and main thread.
 
-Rules:
-- Never silently omit unavailable data. Write down that it's missing and why (empty thinking blocks, truncated token counts, unrecorded timings).
-- Distinguish "the agent found nothing here" from "the agent never looked here."
-- Pull from the persisted transcript, not from memory of the conversation.
-- Be detailed and thorough.
+I want you to use this data to write a code review skill that will work exactly like this one does. It will be designed to be run with different agent harnesses, and perhaps be run on much smaller models, but it should be just as thorough as this one, so be economi with token usage but don't compromise.
+
+Write the skill to /Users/colton/.config/home-manager/agent-shared/skills/code-review-low.md
