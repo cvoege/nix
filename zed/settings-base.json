@@ -57,6 +57,11 @@
         },
       ],
     },
+    // Right now connecting via ssh is a bit broken to a mac, the server binary download doesn't work.
+    // Can fix by downloading the right server release: https://github.com/zed-industries/zed/releases#release-v1.14.2
+    // And putting it in the right location in ~/.zed_server. Will need to make it executable and give it the full
+    // expected path, which is usually something like:
+    // zed-remote-server-stable-1.14.2+stable.337.02abf5b08fa12c1c20a155ae3f796ef4c6c1a01e
     {
       "host": "calephmac",
       "username": "colton",
