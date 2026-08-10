@@ -1,6 +1,4 @@
-I built my code-review-low skill to be as much like the built in claude code code-review command as possible. I ran both and asked each to take notes of everything they did. The notes are this format:
-
-In each of the following folders is a detailed description of how the agentic code review went. It's process, it's findings, etc. This review was of the changes in the branch `colton/preview-environments` compared against `b1` in the repo `/Users/colton/code/monorepo`. Below is a description of the folder structure describing the review:
+Inside ~/code/preview-reviews-claude/low/ is a detailed description of how an agentic code review went. It's process, it's findings, etc. This review was of the changes in the branch `colton/preview-environments` compared against `b1` in the repo `/Users/colton/code/monorepo`. Below is a description of the folder structure describing the review:
 
 README.md - Index of every file. Headline numbers table (agents, duration, tokens, tool calls, findings, confirmed-real, line-number accuracy). One-line summary of each finding.
 summary.json - Machine-readable version of the headline numbers, for cross-level diffing. Same keys in every folder, null where unavailable.
@@ -11,12 +9,6 @@ agents/
 misc/ - Anything else you think would be useful.
   raw/ - verbatim copies of the transcript, agent metadata, and the exact input the agent reviewed. Do not edit these. The verbatim effort-level prompt, annotated with which constraints held and which were violated. What the reviewed change does, file-by-file scope, and the risk surface this effort level did NOT examine. Source context around each finding at CORRECT line numbers. Full timeline, agent and main thread.
 
-Those notes are in:
-1. /Users/colton/code/preview-reviews-claude/low for the built in claude review
-2. /Users/colton/code/preview-reviews-opencode/low for my custom built code-review-low skill
+I want you to use this data to write a code review skill that will work exactly like this one does. It will be designed to be run with different agent harnesses, and perhaps be run on much smaller models, but it should be just as thorough as this one, so be economi with token usage but don't compromise.
 
-I want you to deeply compare the two, the findings they made and the process they took to see how good of an emulation of the built in code-review skill mine is, how it compares in terms of output, performance, token use, and evaluate any gaps.
-
-My skill is is located at /Users/colton/.config/home-manager/agent-nonclaude-shared/skills/code-review-low/SKILL.md 
-
-Tell me how you would iterate on my skill based on the comparison.
+Write the skill to /Users/colton/.config/home-manager/agent-nonclaude-shared/skills/code-review-low/SKILL.md
