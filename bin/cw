@@ -368,7 +368,7 @@ full() {
   local base="${argc_base:-}"
   local prompt="${argc_prompt:-}"
   local effort="${argc_effort:-}"
-  cw create --prompt "$prompt. Then commit. Then push. Then do a /code-review $effort --fix $base . Then commit and push again. Then /create-pr-stack" --background "$branch"
+  cw create --prompt "$prompt. Then commit. Then do a /code-review $effort --fix $base . Then commit and push again. Then /create-pr-stack" --background "$branch"
 }
 
 eval "$(argc --argc-eval "$0" "$@")"
