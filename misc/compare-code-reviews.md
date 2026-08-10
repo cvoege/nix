@@ -1,4 +1,4 @@
-I built my code-review low skill to be as much like the built in claude code code-review command as possible. I ran both and asked each to take notes of everything they did. The notes are this format:
+I built my code-review-low skill to be as much like the built in claude code code-review command as possible. I ran both and asked each to take notes of everything they did. The notes are this format:
 
 README.md - Index of every file. Headline numbers table (agents, duration, tokens, tool calls, findings, confirmed-real, line-number accuracy). One-line summary of each finding.
 summary.json - Machine-readable version of the headline numbers, for cross-level diffing. Same keys in every folder, null where unavailable.
