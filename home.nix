@@ -140,7 +140,7 @@ in
     ".config/ghostty/config" = { source = ./ghostty/config; };
     ".config/nvim" = { source = ./nvim/config; recursive = true; };
 
-    ".config/zed/settings.json" = { source = ./zed/settings-base.json; };
+    ".config/zed/settings-base.json" = { source = ./zed/settings-base.json; };
 
     # # Building this configuration will create a copy of 'dotfiles/screenrc' in
     # # the Nix store. Activating the configuration will then make '~/.screenrc' a
