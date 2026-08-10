@@ -30,6 +30,18 @@ _cw_window_name() {
   fi
 }
 
+# _cw_agent_name <window>
+# Echo a herdr-legal agent name for <window>. herdr requires 1-32 characters of
+# lowercase letters, digits, '-' or '_', starting with a lowercase letter, but
+# window names are upper-cased ticket ids (CHAT-4765) — so lowercase, replace
+# every other character with '-', and prefix a letter if it starts with a digit.
+_cw_agent_name() {
+  local name="${1,,}"
+  name="${name//[^a-z0-9_-]/-}"
+  [[ "$name" =~ ^[a-z] ]] || name="a-$name"
+  echo "${name:0:32}"
+}
+
 
 # _cw_pin_window_dir_tmux <window_id> <dir>
 # Record <dir> as the window's split directory. `new-window -c` only sets the
@@ -142,15 +154,16 @@ create() {
       tmux select-window -t "$win_id"
     fi
   elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
-    local top_pane_id tab_create_output split_output bottom_pane_id tab_id agent_create_output
+    local top_pane_id tab_create_output split_output bottom_pane_id tab_id agent_create_output agent_name
     # Create tab
     tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus)"
     tab_id="$(echo "$tab_create_output" | jq -re .result.tab.tab_id)"
     top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
 
-    _cw_retry 5 1 herdr agent start "$window" --kind "$CW_AGENT" --pane "$top_pane_id" || return 1
+    agent_name="$(_cw_agent_name "$window")"
+    _cw_retry 5 1 herdr agent start "$agent_name" --kind "$CW_AGENT" --pane "$top_pane_id" || return 1
     if [ -n "$prompt" ] ; then
-      herdr agent prompt "$window" "$prompt"
+      herdr agent prompt "$agent_name" "$prompt"
     fi
 
     split_output="$(herdr pane split "$top_pane_id" --direction down --no-focus)"
