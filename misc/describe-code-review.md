@@ -1,4 +1,4 @@
-Write the full output of this review to ~/code/preview-reviews-claude/{effort-level}/.
+Write the full output of this review to ~/code/preview-reviews-{agent-name}/{effort-level}/. Where agent-name is you (claude, opencode, etc.) effort-level is the effort level of the code review (e.g. low), not the current effort setting.
 
 Folders must be comparable across effort levels: identical metric definitions, identical file names, same section order. I will diff them.
 
