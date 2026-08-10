@@ -111,7 +111,6 @@ _run_agent_oneshot() {
 #   done
 # }
 
-
 # @cmd    Create a workspace.
 # @alias start,c
 # @option -b --base <BRANCH>    base a new branch on this instead of trunk
@@ -161,6 +160,11 @@ create() {
     top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
 
     agent_name="$(_cw_agent_name "$window")"
+    # Check the tab and pane are live
+    herdr tab get "$tab_id" | jq -re '.result.tab'
+    herdr pane get "$top_pane_id" | jq -re '.result.pane'
+    # Give a second for the agent to start
+    sleep 0.1
     _cw_retry 5 1 herdr agent start "$agent_name" --kind "$CW_AGENT" --pane "$top_pane_id" || return 1
     if [ -n "$prompt" ] ; then
       herdr agent prompt "$agent_name" "$prompt"
@@ -381,7 +385,47 @@ full() {
   local base="${argc_base:-}"
   local prompt="${argc_prompt:-}"
   local effort="${argc_effort:-}"
-  cw create --prompt "$prompt. Then commit. Then do a /code-review $effort --fix $base . Then commit and push again. Then /create-pr-stack" --background "$branch"
+  cw create --prompt "$prompt. Then commit. Then do a /code-review $effort --fix $base . Then commit again and push. Then /create-pr-stack" --background "$branch"
+}
+
+# _parse_linear_ticket_id <ticket>
+# Echo the upper-cased Linear ticket id (ACT-123) for <ticket>, which may be a
+# bare id (act-123), a Linear branch name with or without its username prefix
+# (colton/act-123-some-title), or an issue URL
+# (https://linear.app/acme/issue/ACT-123/some-title).
+_parse_linear_ticket_id() {
+  local ticket="$1"
+  ticket="${ticket%%[?#]*}"          # drop any query string or fragment
+  ticket="${ticket%/}"
+  if [[ "$ticket" == */issue/* ]]; then
+    ticket="${ticket##*/issue/}"     # URL -> "ACT-123/some-title"
+    ticket="${ticket%%/*}"
+  else
+    ticket="${ticket##*/}"           # branch -> drop the "colton/" prefix
+  fi
+  [[ "$ticket" =~ ^([A-Za-z][A-Za-z0-9]*-[0-9]+)([-_.]|$) ]] \
+    || die "can't parse a linear ticket id from '$1'."
+  echo "${BASH_REMATCH[1]^^}"
+}
+
+# @cmd Complete a linear task end to end, self-reviewing, pushing, and creating a PR.
+# @option -b --base <BRANCH>     base a new branch on this instead of trunk
+# @option -e --effort <LEVEL>    Review effort level (defaults to max)
+# @arg    tickets*                tickets to open
+linear() {
+  local base="${argc_base:-}"
+  local effort="${argc_effort:-}"
+
+  if [ -z "${argc_tickets:-}" ] ; then
+    die "at least one linear ticket required"
+  fi
+
+  for ticket in "${argc_tickets[@]}" ; do
+    local ticket_id
+    ticket_id="$(_parse_linear_ticket_id "$ticket")"
+    branch="${USER,,}/${ticket_id,,}"
+    cw full --prompt "Complete the linear ticket $ticket_id" "$branch"
+  done
 }
 
 eval "$(argc --argc-eval "$0" "$@")"
