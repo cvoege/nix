@@ -256,3 +256,4 @@ Keep the `Closes` line in the body regardless — it still links the PR to the i
 - **Explain the why** - Code shows what; description explains why
 - **Mark WIP early** - Use draft PRs for early feedback
 - **Include Loom** - Record UI changes for easier review
+- **Always print the PR URL** - Always pring the PR URL in your final response.

@@ -118,6 +118,7 @@ whose base, title, or body you had to correct. Then report the full output of
 - **Never create duplicates.** If `gh pr view <branch>` returns a PR, reconcile
   its base, title, and body — don't open another.
 - **Don't touch trunk.** Trunk is only ever a base value, never gets its own PR.
+- **Always print the PR URLs** - Always pring the PR URLs in your final response.
 
 ## Note on Linear auto-close
 
