@@ -11,4 +11,4 @@ misc/ - Anything else you think would be useful.
 
 I want you to use this data to write a code review skill that will work exactly like this one does. It will be designed to be run with different agent harnesses, and perhaps be run on much smaller models, but it should be just as thorough as this one, so be economi with token usage but don't compromise.
 
-Write the skill to /Users/colton/.config/home-manager/agent-shared/skills/code-review-low/SKILL.md
+Write the skill to /Users/colton/.config/home-manager/agent-nonclaude-shared/skills/code-review-low/SKILL.md
