@@ -375,6 +375,19 @@ review-oneshot() {
   cw oneshot --prompt "/code-review $effort --comment" "$branch"
 }
 
+# @cmd Complete an instruction, push, and create a PR if it doesn't exist.
+# @option -b --base <BRANCH>     base a new branch on this instead of trunk
+# @option -p --prompt! <PROMPT>  Prompt to pass the LLM.
+# @option -e --effort <LEVEL>    Review effort level (defaults to max)
+# @arg    branch!                branch to open
+quick() {
+  local branch="${argc_branch:-}"
+  local base="${argc_base:-}"
+  local prompt="${argc_prompt:-}"
+  local effort="${argc_effort:-}"
+  cw create --prompt "$prompt. Then commit and push. Then /create-pr-stack" --background "$branch"
+}
+
 # @cmd Complete an instruction end to end, self-reviewing, pushing, and creating a PR.
 # @option -b --base <BRANCH>     base a new branch on this instead of trunk
 # @option -p --prompt! <PROMPT>  Prompt to pass the LLM.
