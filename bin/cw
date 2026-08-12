@@ -6,6 +6,7 @@ CW_EXIT_PREFIX="cw: oneshot exit "
 CW_AGENT="${CW_AGENT:-claude}"
 # tmux or herdr
 CW_MULTIPLEXER="${CW_MULTIPLEXER:-herdr}"
+DEFAULT_REVIEW_EFFORT="max"
 
 set -euo pipefail
 
@@ -362,7 +363,7 @@ __oneshot() {
 # @arg    branch!                branch to open
 review() {
   local branch="${argc_branch:-}"
-  local effort="${argc_effort:-max}"
+  local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
   cw create --prompt "/code-review $effort ; Print the findings in an easily readable format, with line numbers and suggested fixes." --background "$branch"
 }
 
@@ -371,20 +372,18 @@ review() {
 # @arg    branch!                branch to open
 review-oneshot() {
   local branch="${argc_branch:-}"
-  local effort="${argc_effort:-max}"
+  local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
   cw oneshot --prompt "/code-review $effort --comment" "$branch"
 }
 
 # @cmd Complete an instruction, push, and create a PR if it doesn't exist.
 # @option -b --base <BRANCH>     base a new branch on this instead of trunk
 # @option -p --prompt! <PROMPT>  Prompt to pass the LLM.
-# @option -e --effort <LEVEL>    Review effort level (defaults to max)
 # @arg    branch!                branch to open
 quick() {
   local branch="${argc_branch:-}"
   local base="${argc_base:-}"
   local prompt="${argc_prompt:-}"
-  local effort="${argc_effort:-}"
   cw create --prompt "$prompt. Then commit and push. Then /create-pr-stack" --background "$branch"
 }
 
@@ -397,7 +396,7 @@ full() {
   local branch="${argc_branch:-}"
   local base="${argc_base:-}"
   local prompt="${argc_prompt:-}"
-  local effort="${argc_effort:-}"
+  local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
   cw create --prompt "$prompt. Then commit. Then do a /code-review $effort --fix $base . Then commit again and push. Then /create-pr-stack" --background "$branch"
 }
 
@@ -427,7 +426,7 @@ _parse_linear_ticket_id() {
 # @arg    tickets*                tickets to open
 linear() {
   local base="${argc_base:-}"
-  local effort="${argc_effort:-}"
+  local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
 
   if [ -z "${argc_tickets:-}" ] ; then
     die "at least one linear ticket required"
