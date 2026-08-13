@@ -46,31 +46,120 @@
 
 set -euo pipefail
 
+# ---- lookup tables -------------------------------------------------------
+# Every walk below (stack_root, stack_children, the tree printers) asks for the
+# same handful of facts over and over — a branch's parent, a ref's sha — and
+# each answer used to cost a `git` exec, so a stack of n branches spent O(n²)
+# process spawns just re-reading config. We read each set once per process
+# instead, into the shell's own variable table, which is the only container bash
+# 3.2 offers with O(1) keyed lookup. (A newline-delimited "<key>\t<value>"
+# string looks tempting and is far worse: `${map#*$'\n'key$'\t'}` re-scans from
+# the front for every candidate prefix, so one lookup in a repo with a few
+# thousand refs takes minutes.) Warmed in the dispatcher before any subshell is
+# forked, so process substitutions inherit the tables rather than rebuilding
+# them.
+
+# Encode an arbitrary ref name as the tail of a variable name: alphanumerics
+# pass through, every other byte becomes _<2 hex digits>. Injective — a literal
+# '_' encodes to _5f, so it can never be mistaken for an escape — and byte-wise
+# (LC_ALL=C) so a multi-byte character can't widen an escape and alias another
+# key. Callers always prefix the result, so a name starting with a digit is fine.
+_ENC=""
+_enc() { # ref -> $_ENC
+  local LC_ALL=C s="$1" out="" head ch
+  while [[ -n "$s" ]]; do
+    head="${s%%[!A-Za-z0-9]*}"            # leading run of safe characters
+    if [[ -n "$head" ]]; then out+="$head"; s="${s#"$head"}"; fi
+    [[ -n "$s" ]] || break
+    ch="${s:0:1}"; s="${s:1}"
+    printf -v out '%s_%02x' "$out" "'$ch"
+  done
+  _ENC="$out"
+}
+
 # ---- trunk ---------------------------------------------------------------
 
+_TRUNK=""
+
 stack_trunk() {
+  if [[ -n "$_TRUNK" ]]; then echo "$_TRUNK"; return 0; fi
   local t
   t=$(git config --get stack.trunk || true)
-  if [[ -n "$t" ]]; then echo "$t"; return 0; fi
-  # origin's default branch, e.g. refs/remotes/origin/HEAD -> origin/trunk
-  t=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [[ -n "$t" ]]; then echo "${t#origin/}"; return 0; fi
-  local c
-  for c in trunk main master; do
-    if git show-ref --verify --quiet "refs/heads/$c"; then echo "$c"; return 0; fi
-  done
-  echo "main"
+  if [[ -z "$t" ]]; then
+    # origin's default branch, e.g. refs/remotes/origin/HEAD -> origin/trunk
+    t=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    t="${t#origin/}"
+  fi
+  if [[ -z "$t" ]]; then
+    local c
+    for c in trunk main master; do
+      if git show-ref --verify --quiet "refs/heads/$c"; then t="$c"; break; fi
+    done
+  fi
+  _TRUNK="${t:-main}"
+  echo "$_TRUNK"
 }
 
 # ---- branch / parent metadata -------------------------------------------
 
 branch_exists() { git show-ref --verify --quiet "refs/heads/$1"; }
 
-stack_parent() { git config --get "branch.$1.stackParent" || true; }
+# Read every recorded parent pointer into two lookup tables (see "lookup tables"
+# above): $_sp_<enc> holds a branch's parent, and $_sk_<enc> the newline-joined
+# children of a branch, so stack_children answers without scanning. git
+# canonicalises config keys to lowercase (branch.<name>.stackparent) but
+# preserves the case of the <name> subsection, so the branch name is recovered
+# by stripping the fixed prefix and suffix.
+_PARENTS_LOADED=0
+_TRACKED=()
 
-stack_set_parent() { git config "branch.$1.stackParent" "$2"; }
+stack_load_parents() {
+  [[ $_PARENTS_LOADED -eq 1 ]] && return 0
+  _PARENTS_LOADED=1
+  local line key parent kv
+  _TRACKED=()
+  while IFS= read -r line; do
+    # "<key> <value>"; a key with no space after it is a parent recorded as the
+    # empty string, which points nowhere — skip it rather than read the key
+    # itself back as a branch name.
+    [[ "$line" == *" "* ]] || continue
+    key="${line%% *}"                     # branch.<name>.stackparent
+    key="${key#branch.}"; key="${key%.stackparent}"
+    parent="${line#* }"
+    _TRACKED+=("$key")
+    _enc "$key";    printf -v "_sp_$_ENC" '%s' "$parent"
+    _enc "$parent"; kv="_sk_$_ENC"; printf -v "$kv" '%s' "${!kv-}$key"$'\n'
+  done < <(git config --get-regexp '^branch\..*\.stackParent$' 2>/dev/null || true)
+}
 
-stack_unset_parent() { git config --unset "branch.$1.stackParent" 2>/dev/null || true; }
+# Drop the tables after a write so the next read reflects it. Writers only ever
+# run in the main shell (never inside a `$(…)`), so the invalidation is seen.
+stack_invalidate_parents() {
+  local v
+  for v in ${!_sp_@} ${!_sk_@}; do unset "$v"; done
+  _TRACKED=(); _PARENTS_LOADED=0
+}
+
+stack_parent() {
+  # Commands that only ever ask about a branch or two (diff, parent) never build
+  # the table: in a repo tracking hundreds of branches, tabulating all of them
+  # costs more than the single lookup it would serve. Traversals warm it in the
+  # dispatcher, and from then on this is a table read.
+  if [[ $_PARENTS_LOADED -eq 0 ]]; then
+    git config --get "branch.$1.stackParent" || true
+    return 0
+  fi
+  local v; _enc "$1"; v="_sp_$_ENC"
+  [[ -n "${!v-}" ]] && echo "${!v}"
+  return 0
+}
+
+stack_set_parent() { git config "branch.$1.stackParent" "$2"; stack_invalidate_parents; }
+
+stack_unset_parent() {
+  git config --unset "branch.$1.stackParent" 2>/dev/null || true
+  stack_invalidate_parents
+}
 
 # One-shot rebase base ("fork point") recorded when a branch is reparented off a
 # branch that's being removed (e.g. a squash-merged parent). It pins the commit
@@ -118,20 +207,21 @@ assert_branches_free() { # verb branch...
 }
 
 # All local branches that have a recorded parent.
-# git canonicalises config keys to lowercase (branch.<name>.stackparent), but
-# preserves the case of the <name> subsection; each line is "<key> <value>".
 stack_tracked_branches() {
-  git config --get-regexp '^branch\..*\.stackParent$' 2>/dev/null \
-    | sed -E 's/^branch\.(.*)\.stackparent .*$/\1/' || true
+  stack_load_parents
+  local b
+  for b in ${_TRACKED[@]+"${_TRACKED[@]}"}; do echo "$b"; done
+  return 0
 }
 
-# Direct children of a branch (tracked branches whose parent == $1).
+# Direct children of a branch (tracked branches whose parent == $1). A straight
+# table read: this used to be a `git config` exec per tracked branch, per node
+# visited.
 stack_children() {
-  local target="$1" b
-  while read -r b; do
-    [[ -z "$b" ]] && continue
-    [[ "$(stack_parent "$b")" == "$target" ]] && echo "$b"
-  done < <(stack_tracked_branches)
+  stack_load_parents
+  local v; _enc "$1"; v="_sk_$_ENC"
+  printf '%s' "${!v-}"                    # already one child per line
+  return 0
 }
 
 # Walk parent pointers from $1 up to the root branch (the one whose parent is
@@ -181,6 +271,74 @@ stack_check_err() {
 # ---- misc ----------------------------------------------------------------
 
 sha() { git rev-parse --verify --quiet "$1^{commit}"; }
+
+# Tip shas for the NAMED branches — both the local ref and its origin
+# counterpart — into the $_rs_<enc> table, in one git call. Read-only display
+# paths use it instead of a rev-parse per ref; mutating commands keep using
+# sha() / branch_exists(), which stay correct as branches are created and
+# rewritten. Scoped to the branches actually being shown rather than every ref
+# in the repo: a busy monorepo has thousands, and loading them all would cost
+# more than the lookups save.
+load_refs() { # branch...
+  [[ $# -gt 0 ]] || return 0
+  local name value b
+  local -a patterns=()
+  for b in "$@"; do patterns+=("refs/heads/$b" "refs/remotes/origin/$b"); done
+  while IFS=$'\t' read -r name value; do
+    [[ -n "$name" ]] || continue
+    _enc "$name"; printf -v "_rs_$_ENC" '%s' "$value"
+  done < <(git for-each-ref --format='%(refname)%09%(objectname)' \
+             "${patterns[@]}" 2>/dev/null || true)
+}
+
+# Tip sha of a full refname from the table -> $_REF_SHA (empty when the ref
+# doesn't exist, which is how the display tells "not pushed yet" apart).
+_REF_SHA=""
+ref_sha() { # refname
+  local v; _enc "$1"; v="_rs_$_ENC"; _REF_SHA="${!v-}"
+}
+
+# Ahead/behind counts against a common base, for many branches in one git call,
+# into the $_ab_<enc> table as "<ahead> <behind>". Best-effort by design:
+# %(ahead-behind:) needs git 2.41+, and a base that isn't a valid committish
+# yields nothing — either way the table stays empty for those branches and the
+# caller falls back to counting them one at a time.
+load_ahead_behind() { # base branch...
+  local base="$1"; shift
+  [[ -n "$base" && $# -gt 0 ]] || return 0
+  local name a b x
+  local -a patterns=()
+  for x in "$@"; do patterns+=("refs/heads/$x"); done
+  while read -r name a b; do
+    [[ -n "$name" && -n "$b" ]] || continue
+    _enc "${name#refs/heads/}"; printf -v "_ab_$_ENC" '%s %s' "$a" "$b"
+  done < <(git for-each-ref --format="%(refname)%09%(ahead-behind:$base)" \
+             "${patterns[@]}" 2>/dev/null || true)
+  return 0
+}
+
+# Prime that table for a set of branches, grouped by each branch's own stack
+# parent so a shared parent costs one git call rather than one per branch. Only
+# worth it where many branches share a parent (a repo full of one-branch stacks
+# rooted on trunk); a linear stack gives every branch a distinct parent, so
+# there it's left to the per-branch path.
+prime_ahead_behind() { # branch...
+  [[ $# -gt 0 ]] || return 0
+  local b p pv cur=""
+  local -a group=()
+  while IFS=$'\t' read -r p b; do
+    if [[ "$p" != "$cur" ]]; then
+      [[ ${#group[@]} -gt 0 ]] && load_ahead_behind "$cur" "${group[@]}"
+      cur="$p"; group=()
+    fi
+    group+=("$b")
+  done < <(for b in "$@"; do
+             _enc "$b"; pv="_sp_$_ENC"
+             [[ -n "${!pv-}" ]] && printf '%s\t%s\n' "${!pv}" "$b"
+           done | sort)
+  [[ ${#group[@]} -gt 0 ]] && load_ahead_behind "$cur" "${group[@]}"
+  return 0
+}
 
 # True if $1 is an ancestor of (or equal to) $2.
 is_ancestor() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
@@ -627,20 +785,34 @@ cmd_show() {
   fi
   root=$(stack_root "$cur") || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
 
+  local b; local -a branches=()
+  while IFS= read -r b; do
+    [[ -n "$b" ]] && branches+=("$b")
+  done < <(stack_collect "$cur")
+  load_refs ${branches[@]+"${branches[@]}"}
+
   echo "$trunk"
   _show_subtree "$root" "$trunk" "$cur" ""
 }
 
 _show_subtree() { # branch parent currentBranch indent
   local b="$1" parent="$2" cur="$3" indent="$4"
-  local ahead behind marker remote=""
-  ahead=$(ahead_count "$parent" "$b")
-  behind=$(ahead_count "$b" "$parent")
+  local ahead behind marker remote="" btip="" rtip="" v
+  _enc "$b"; v="_ab_$_ENC"
+  if [[ -n "${!v-}" ]]; then                    # batched by prime_ahead_behind
+    ahead="${!v%% *}"; behind="${!v##* }"
+  else
+    # One rev-list for both counts: --left-right --count prints "<left>\t<right>",
+    # i.e. commits only on $parent (behind) then only on $b (ahead).
+    read -r behind ahead < <(git rev-list --left-right --count "$parent...$b" 2>/dev/null || echo "0 0")
+  fi
   [[ "$b" == "$cur" ]] && marker=" *" || marker=""
-  if git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null; then
-    if [[ "$(sha "$b")" == "$(sha "origin/$b")" ]]; then remote=" [synced]"
-    else remote=" [unpushed]"; fi
-  else remote=" [local]"; fi
+  # Callers (cmd_show, cmd_stacks) prime the ref table for the whole tree first.
+  ref_sha "refs/heads/$b";           btip="$_REF_SHA"
+  ref_sha "refs/remotes/origin/$b";  rtip="$_REF_SHA"
+  if [[ -z "$rtip" ]]; then remote=" [local]"
+  elif [[ "$btip" == "$rtip" ]]; then remote=" [synced]"
+  else remote=" [unpushed]"; fi
   printf '%s└─ %s%s  (+%s/-%s vs %s)%s\n' "$indent" "$b" "$marker" "$ahead" "$behind" "$parent" "$remote"
   local child
   while read -r child; do
@@ -677,6 +849,10 @@ cmd_stacks() {
   fi
 
   if [[ ${#roots[@]} -gt 0 ]]; then
+    # Every tracked branch can appear in one of the trees printed below.
+    stack_load_parents
+    load_refs          ${_TRACKED[@]+"${_TRACKED[@]}"}
+    prime_ahead_behind ${_TRACKED[@]+"${_TRACKED[@]}"}
     IFS=$'\n' roots=($(printf '%s\n' "${roots[@]}" | sort)); unset IFS
     local n=${#roots[@]}
     printf '%d stack%s on %s:\n' "$n" "$([[ $n -eq 1 ]] || echo s)" "$trunk"
@@ -697,6 +873,44 @@ cmd_stacks() {
   fi
 }
 
+# ---- github --------------------------------------------------------------
+# `gh pr view` is a network round-trip of a few hundred milliseconds, and the
+# commands below need one per branch — so a deep stack spent nearly all of its
+# wall clock waiting on them one at a time. pr_prefetch issues them
+# concurrently, in bounded batches so we don't trip GitHub's secondary rate
+# limits, and caches each result on disk; pr_json then hands a branch's JSON
+# back with no further network use. A branch with no PR caches an empty file,
+# which reads back exactly like the old `gh pr view … || true` did.
+
+_PR_DIR=""
+
+_pr_cache_file() { # branch -> path ('/' is legal in branch names, not in files)
+  printf '%s/%s.json' "$_PR_DIR" "${1//\//%2F}"
+}
+
+pr_prefetch() { # fields branch...
+  local fields="$1"; shift
+  [[ $# -gt 0 ]] || return 0
+  if [[ -z "$_PR_DIR" ]]; then
+    _PR_DIR=$(mktemp -d "${TMPDIR:-/tmp}/git-stack-pr.XXXXXX")
+    trap 'rm -rf "$_PR_DIR"' EXIT
+  fi
+  local b f n=0
+  for b in "$@"; do
+    f=$(_pr_cache_file "$b")
+    { gh pr view "$b" --json "$fields" >"$f" 2>/dev/null || : >"$f"; } &
+    n=$((n + 1))
+    [[ $((n % 8)) -eq 0 ]] && wait
+  done
+  wait
+}
+
+pr_json() { # branch -> the prefetched JSON, or nothing when there's no PR
+  local f; f=$(_pr_cache_file "$1")
+  [[ -s "$f" ]] && cat "$f"
+  return 0
+}
+
 # Re-trigger the Claude GitHub bot on every PR in the current stack: hide the
 # bot's prior top-level review comments (mark OUTDATED) and post a fresh
 # "@claude review once". Skips branches with no PR. Idempotent re-hides.
@@ -714,10 +928,17 @@ cmd_review() {
   stack_root "$cur" >/dev/null || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
 
   local b pr ids id hidden
-  local -a skipped=()
+  local -a skipped=() branches=()
   while IFS= read -r b; do
-    [[ -n "$b" ]] || continue
-    pr=$(gh pr view "$b" --json number,comments 2>/dev/null || true)
+    [[ -n "$b" ]] && branches+=("$b")
+  done < <(if [[ $single -eq 1 ]]; then printf '%s\n' "$cur"; else stack_collect "$cur"; fi)
+
+  # Read every PR up front, in parallel; the mutations below stay serial so
+  # their progress output (and any failure) stays in stack order.
+  pr_prefetch number,comments ${branches[@]+"${branches[@]}"}
+
+  for b in "${branches[@]}"; do
+    pr=$(pr_json "$b")
     if [[ -z "$pr" ]]; then
       skipped+=("$b"); info "skip $b — no PR"; continue
     fi
@@ -736,7 +957,7 @@ cmd_review() {
     gh pr comment "$b" --body "@claude review once" >/dev/null \
       || die "failed to post review trigger on $b"
     info "$b — hid $hidden stale claude comment(s), requested fresh review"
-  done < <(if [[ $single -eq 1 ]]; then printf '%s\n' "$cur"; else stack_collect "$cur"; fi)
+  done
 
   if [[ ${#skipped[@]} -gt 0 ]]; then
     info "skipped (no PR): ${skipped[*]}"
@@ -757,6 +978,12 @@ cmd_prs() {
   fi
   root=$(stack_root "$cur") || die "'$cur' is not a tracked stack branch (try: git stack parent <parent>)."
 
+  local b; local -a branches=()
+  while IFS= read -r b; do
+    [[ -n "$b" ]] && branches+=("$b")
+  done < <(stack_collect "$cur")
+  pr_prefetch number,url,additions,deletions,title ${branches[@]+"${branches[@]}"}
+
   _show_subtree_prs "$root" "$cur" ""
 }
 
@@ -776,18 +1003,21 @@ cmd_prs_list() {
 
   echo "trunk: $trunk"
   local b parent marker pr num url add del title state
+  local -a branches=()
   while IFS= read -r b; do
-    [[ -n "$b" ]] || continue
+    [[ -n "$b" ]] && branches+=("$b")
+  done < <(stack_collect "$cur")
+  pr_prefetch number,url,additions,deletions,state,title ${branches[@]+"${branches[@]}"}
+
+  for b in "${branches[@]}"; do
     parent=$(stack_parent "$b")
     [[ "$b" == "$cur" ]] && marker=" [current]" || marker=""
-    pr=$(gh pr view "$b" --json number,url,additions,deletions,title,state 2>/dev/null || true)
+    pr=$(pr_json "$b")
     if [[ -n "$pr" ]]; then
-      num=$(jq -r '.number'    <<< "$pr")
-      url=$(jq -r '.url'       <<< "$pr")
-      add=$(jq -r '.additions' <<< "$pr")
-      del=$(jq -r '.deletions' <<< "$pr")
-      title=$(jq -r '.title'   <<< "$pr")
-      state=$(jq -r '.state'   <<< "$pr")
+      # One jq per branch, not one per field: title goes last so a title
+      # containing a tab can't shift the fields before it.
+      IFS=$'\t' read -r num url add del state title \
+        < <(jq -r '[.number, .url, .additions, .deletions, .state, .title] | @tsv' <<< "$pr")
       printf -- '- %s%s (parent: %s) — PR #%s [%s] (+%s/-%s) "%s" %s\n' \
         "$b" "$marker" "$parent" "$num" "$state" "$add" "$del" "$title" "$url"
     else
@@ -798,20 +1028,18 @@ cmd_prs_list() {
       printf -- '- %s%s (parent: %s) — no PR (+%s/-%s)\n' \
         "$b" "$marker" "$parent" "${add:-0}" "${del:-0}"
     fi
-  done < <(stack_collect "$cur")
+  done
 }
 
 _show_subtree_prs() { # branch currentBranch indent
   local b="$1" cur="$2" indent="$3"
   local marker num url add del title label
   [[ "$b" == "$cur" ]] && marker="* " || marker=""
-  local pr; pr=$(gh pr view "$b" --json number,url,additions,deletions,title 2>/dev/null || true)
+  local pr; pr=$(pr_json "$b")
   if [[ -n "$pr" ]]; then
-    num=$(jq -r '.number' <<< "$pr")
-    url=$(jq -r '.url'    <<< "$pr")
-    add=$(jq -r '.additions' <<< "$pr")
-    del=$(jq -r '.deletions' <<< "$pr")
-    title=$(jq -r '.title' <<< "$pr")
+    # Title last so a tab inside it can't shift the fields before it.
+    IFS=$'\t' read -r num url add del title \
+      < <(jq -r '[.number, .url, .additions, .deletions, .title] | @tsv' <<< "$pr")
     label="[PR $num]($url): (+$add / -$del) $title"
   else
     local stat
@@ -1333,11 +1561,18 @@ cmd_sync() {
   git rev-parse --verify --quiet "refs/remotes/origin/$trunk" >/dev/null \
     && trunk_ref="origin/$trunk"
 
+  # One parallel round-trip for every branch's PR state instead of a serial
+  # `gh pr view` inside the is_merged loop below.
+  [[ $have_gh -eq 1 ]] && pr_prefetch state "${chain[@]}"
+
   is_merged() { # branch ; uses $have_gh and $trunk_ref
-    local x="$1"
+    local x="$1" pr
     if [[ $have_gh -eq 1 ]]; then
-      [[ "$(gh pr view "$x" --json state --jq '.state' 2>/dev/null || true)" == "MERGED" ]] \
-        && return 0
+      # Matched rather than piped through jq: sync only ever required gh (which
+      # has its own --jq), and the prefetched document holds nothing but the
+      # state field, so there's nothing else the pattern could hit.
+      pr=$(pr_json "$x")
+      [[ "$pr" =~ \"state\"[[:space:]]*:[[:space:]]*\"MERGED\" ]] && return 0
     fi
     is_ancestor "$x" "$trunk_ref" && return 0
     return 1
@@ -1465,6 +1700,22 @@ cmd_sync_all() {
 }
 
 sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
+
+# Warm the parent table here, in the main shell, so every subshell forked below
+# (command substitutions, the `< <(stack_collect …)` loops) inherits it instead
+# of rebuilding its own copy and throwing it away on exit. Only for the
+# subcommands that walk the stack — the rest do a couple of lookups, which
+# stack_parent serves without building the table at all. Adding a traversing
+# subcommand without listing it here costs speed, never correctness.
+case "$sub" in
+  show|""|list-stacks|all|prs|review|list|checkout|co|collapse|restack|sync|sync-all|remove|infer)
+    stack_load_parents ;;
+esac
+case "$sub" in
+  -h|--help|help) ;;
+  *) stack_trunk >/dev/null ;;      # cheap, and nearly every path needs it
+esac
+
 case "$sub" in
   show|"")        cmd_show "$@" ;;
   list-stacks|all) cmd_stacks "$@" ;;

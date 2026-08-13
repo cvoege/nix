@@ -33,6 +33,23 @@ test_prs_list_flat_format() {
   assert_output_contains "[current]"
 }
 
+# PR lookups are prefetched into a cache keyed by branch name; '/' is legal in a
+# branch name but not in a file name, so the key has to be escaped.
+test_prs_handles_slash_branch_names() {
+  make_repo
+  git stack new feature/a >/dev/null 2>&1
+  commit "work on a" fa.txt
+  git stack new feature/b >/dev/null 2>&1
+  commit "work on b" fb.txt
+  gh_add_pr feature/a main      OPEN 5 10 2 "Feat A"
+  gh_add_pr feature/b feature/a OPEN 6 3  1 "Feat B"
+  run git stack prs list
+  assert_success
+  assert_output_contains "feature/a (parent: main) — PR #5"
+  assert_output_contains "feature/b [current] (parent: feature/a) — PR #6"
+  assert_output_not_contains "no PR"
+}
+
 test_review_hides_comments_and_requests_fresh() {
   make_repo
   linear_stack a b

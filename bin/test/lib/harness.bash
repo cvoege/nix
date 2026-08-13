@@ -93,6 +93,19 @@ linear_stack() {
   done
 }
 
+# N branches on trunk, each with a parent pointer recorded. Built without a
+# commit or a `git` call per branch — refs via one update-ref --stdin, parent
+# pointers by appending config sections — so a scaling test stays quick.
+many_tracked_branches() { # count [prefix=perf]
+  local n="$1" prefix="${2:-perf}" i head
+  head=$(git rev-parse HEAD) || return 1
+  for ((i = 1; i <= n; i++)); do echo "create refs/heads/$prefix-$i $head"; done \
+    | git update-ref --stdin || return 1
+  for ((i = 1; i <= n; i++)); do
+    printf '[branch "%s-%s"]\n\tstackParent = main\n' "$prefix" "$i"
+  done >>"$(git rev-parse --git-dir)/config"
+}
+
 # ---- fake-gh fixture writers --------------------------------------------
 # Rows are TAB-separated; see fixtures/gh for the column layout.
 
