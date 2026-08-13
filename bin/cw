@@ -154,9 +154,10 @@ create() {
       tmux select-window -t "$win_id"
     fi
   elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
-    local top_pane_id tab_create_output split_output bottom_pane_id tab_id agent_create_output agent_name
+    local top_pane_id tab_create_output split_output bottom_pane_id tab_id agent_name workspace_id
+    workspace_id="$HERDR_WORKSPACE_ID"
     # Create tab
-    tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus)"
+    tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus --workspace "$workspace_id")"
     tab_id="$(echo "$tab_create_output" | jq -re .result.tab.tab_id)"
     top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
 
@@ -322,9 +323,10 @@ oneshot() {
     tmux send-keys -t "$win_id.0" \
       "$(printf 'cw __oneshot %q %q %q' "$branch" "$prompt" "$log")" Enter
   elif [ "$CW_MULTIPLEXER" = "herdr" ] ; then
-    local top_pane_id tab_create_output
+    local top_pane_id tab_create_output workspace_id
     # Create tab
-    tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus)"
+    workspace_id="$HERDR_WORKSPACE_ID"
+    tab_create_output="$(herdr tab create --cwd "$worktree" --label "$window" --env CW_WORKTREE="$worktree" --no-focus --workspace "$workspace_id")"
     top_pane_id="$(echo "$tab_create_output" | jq -re .result.root_pane.pane_id)"
 
     herdr pane run "$top_pane_id" "$(printf 'cw __oneshot %q %q %q' "$branch" "$prompt" "$log")"
