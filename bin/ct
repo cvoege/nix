@@ -356,16 +356,26 @@ _ct_repair_stranded() {
   done < <(_ct_list_pool_worktrees)
 }
 
+# _ct_sort_by_number
+# Sort ct-worktree-N paths on stdin by N. `git worktree list` orders them
+# lexically, which puts ct-worktree-10 before ct-worktree-2.
+_ct_sort_by_number() {
+  awk -F/ '{ n = $NF; sub(/^ct-worktree-/, "", n); print n "\t" $0 }' \
+    | sort -n | cut -f2-
+}
+
 # _ct_find_parked
 # Claim and echo a parked pool worktree, or nothing if none could be taken.
 # Candidates are tried in turn rather than only the first, so one worktree left
-# dirty or mid-operation can't block the whole pool.
+# dirty or mid-operation can't block the whole pool. Lowest number first, so a
+# pool that has grown into the tens keeps reusing its low-numbered worktrees
+# instead of leaving them idle behind ct-worktree-10.
 _ct_find_parked() {
   local path
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if _ct_claim "$path"; then echo "$path"; return 0; fi
-  done < <(_ct_list_parked)
+  done < <(_ct_list_parked | _ct_sort_by_number)
 }
 
 # _ct_get_path_leaf <path>
@@ -395,32 +405,33 @@ _ct_is_ct_worktree() {
 }
 
 # _ct_next_worktree_number
-# Echo the next free pool number: one past the highest ct-worktree-N seen among
-# both registered worktrees and any leftover dirs under the base.
+# Echo the lowest free pool number: the smallest N with no ct-worktree-N among
+# the registered worktrees or the leftover dirs under the base. Lowest free, not
+# highest+1: highest+1 never returns to a hole, so removing ct-worktree-1 from a
+# pool that reached ct-worktree-11 numbered every later create 12, 13, … and left
+# 1 a gap forever. A stale (prunable) registration counts as taken — `git
+# worktree add` refuses that path too.
 _ct_next_worktree_number() {
-  local base n max=0 path
+  local base n path
+  local -A taken=()
   base="$(_ct_pool_base)" || return 1
 
   # Check actual worktrees
   while IFS= read -r path; do
-    if _ct_is_ct_worktree "$path" ; then
-      n="$(_ct_get_worktree_number "$path")"
-      if (( n > max )); then max=$n; fi
-    fi
+    if n="$(_ct_get_worktree_number "$path")"; then taken[$n]=1; fi
   done < <(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}')
 
   # Check leftover dirs
   if [ -d "$base" ]; then
     for path in "$base"/ct-worktree-*; do
       [ -e "$path" ] || continue
-      if _ct_is_ct_worktree "$path" ; then
-        n="$(_ct_get_worktree_number "$path")"
-        if (( n > max )); then max=$n; fi
-      fi
+      if n="$(_ct_get_worktree_number "$path")"; then taken[$n]=1; fi
     done
   fi
 
-  echo $(( max + 1 ))
+  n=1
+  while [ -n "${taken[$n]:-}" ]; do n=$(( n + 1 )); done
+  echo "$n"
 }
 
 
