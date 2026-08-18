@@ -1,6 +1,6 @@
 ---
 name: create-pr-stack
-description: Create a single stacked pull request targeting its `git stack` parent as base, following Aleph conventions. Use when opening one PR for a branch in a `git stack` stack, writing its description, or preparing it for review.
+description: Create a single stacked pull request targeting its `git stack` parent as base, following Aleph conventions. Use when opening one PR for a branch in a `git stack` stack or writing its description.
 ---
 
 # Create Pull Request
@@ -8,6 +8,19 @@ description: Create a single stacked pull request targeting its `git stack` pare
 Follow these conventions when creating pull requests for Aleph repositories.
 
 **Requires**: GitHub CLI (`gh`) authenticated and available.
+
+## Scope
+
+This skill only gathers information about the branch's changes and opens the PR. That's it.
+
+**Do NOT:**
+
+- Run a code review, security review, or any review skill/subagent (e.g. `/code-review`, `/security-review`, `/simplify`)
+- Run type checks, linters, formatters, builds, or tests
+- Critique the code, or fix, refactor, or otherwise modify any code
+- Block on, or wait for, any of the above
+
+Those steps run separately and are not this skill's job. Read the diff only to write an accurate title and description, then create the PR.
 
 ## PR Title Format (CI Enforced)
 
@@ -109,13 +122,15 @@ git status
 git log $(git stack parent)..HEAD --oneline
 ```
 
-### Step 2: Analyze Changes
+### Step 2: Collect the Changes
 
-Review all commits that will be included:
+Read the diff of every commit that will be included, purely to understand what the PR does:
 
 ```bash
 git diff $(git stack parent)...HEAD
 ```
+
+This is information gathering for the description only — don't evaluate the code, run checks, or make changes.
 
 ### Step 3: Write the Description
 
