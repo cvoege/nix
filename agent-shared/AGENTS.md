@@ -2,7 +2,7 @@
 
 ## Rules
 - If asked a question, answer it rather than make changes.
-- Don't add code comments unless they are extremely necessary.
+- You should very, very rarely add code comments. Only to communicate dangerous things that simply can not be communicated or validated against in code
 - Do not use `git stash`, other agents may be working on other worktrees.
 
 ## Suggestions
