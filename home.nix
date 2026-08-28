@@ -18,7 +18,7 @@ let
   # flakes, so it's not installable via the nix method on their install page
   # (`nix run github:herdrdev/herdr/...`). Instead we grab the prebuilt macOS
   # release binary directly, pinned by content hash like any other fetchurl.
-  herdrVersion = "0.8.0";
+  herdrVersion = "0.8.2";
   herdrSources = {
     aarch64-darwin = {
       url = "https://github.com/herdrdev/herdr/releases/download/v${herdrVersion}/herdr-macos-aarch64";
