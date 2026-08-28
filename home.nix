@@ -18,15 +18,22 @@ let
   # flakes, so it's not installable via the nix method on their install page
   # (`nix run github:herdrdev/herdr/...`). Instead we grab the prebuilt macOS
   # release binary directly, pinned by content hash like any other fetchurl.
+  #
+  # `name` must carry the version. A fetchurl store path is keyed by (name,
+  # hash) and never the URL, so without the version both releases share the name
+  # `herdr-macos-aarch64` — and bumping herdrVersion while forgetting to update
+  # sha256 silently reuses the cached OLD binary instead of failing.
   herdrVersion = "0.8.2";
   herdrSources = {
     aarch64-darwin = {
+      name = "herdr-${herdrVersion}-macos-aarch64";
       url = "https://github.com/herdrdev/herdr/releases/download/v${herdrVersion}/herdr-macos-aarch64";
-      sha256 = "0y41cnn89ggz13sws2wrlw5dsnig018vy9r9cdawrpygzj9ryfnm";
+      sha256 = "0x75d9pwjbw5a0yga9c44lqvmyh0jdam04413z4hkcyq0kaz9m55";
     };
     x86_64-darwin = {
+      name = "herdr-${herdrVersion}-macos-x86_64";
       url = "https://github.com/herdrdev/herdr/releases/download/v${herdrVersion}/herdr-macos-x86_64";
-      sha256 = "0jfng2xv1acagw6y5540s0d362f207n79r18pkrsmjlgdkymmjvp";
+      sha256 = "1hg2p0qz3d4xlb7yjvbix31jihq8bhjrs93d0nlpmkchh4n2cl5b";
     };
   };
   herdr = pkgs.runCommand "herdr-${herdrVersion}" { } ''
