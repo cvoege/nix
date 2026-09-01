@@ -384,6 +384,24 @@ in
       r() {
         local pkg="$1"
         local script="$2"
+        if [ "$pkg" = "gcu" ] ; then
+          pkg="global-common-utils"
+        elif [ "$pkg" = "ac" ] ; then
+          pkg="addin-core"
+        elif [ "$pkg" = "fcu" ] ; then
+          pkg="frontend-common-utils"
+        elif [ "$pkg" = "fcc" ] ; then
+          pkg="frontend-common-components"
+        elif [ "$pkg" = "uc" ] ; then
+          pkg="ui-components"
+        elif [ "$pkg" = "ea" ] ; then
+          pkg="excel-addin"
+        elif [ "$pkg" = "ga" ] ; then
+          pkg="gs-addin"
+        elif [ "$pkg" = "was" ] ; then
+          pkg="workbook-automation-service"
+        fi
+
         shift 2
         pnpm turbo run --filter "@getaleph/$pkg" "$script" "$@"
       }
