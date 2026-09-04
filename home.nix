@@ -116,6 +116,7 @@ in
     pkgs.bun
     # Declarative CLI argument parsing for ./bin/* (see the `# @cmd` comments).
     pkgs.argc
+    pkgs.uv
     herdr
   ];
 
