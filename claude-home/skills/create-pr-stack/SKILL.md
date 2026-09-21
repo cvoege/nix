@@ -1,6 +1,6 @@
 ---
 name: create-pr-stack
-description: Create a single stacked pull request targeting its `git stack` parent as base, following Aleph conventions. Use when opening one PR for a branch in a `git stack` stack or writing its description.
+description: Create a single stacked pull request targeting its `git stack` parent as base, following Aleph conventions, with a skeleton body for the human to fill in. Use when opening one PR for a branch in a `git stack` stack.
 ---
 
 # Create Pull Request
@@ -11,16 +11,17 @@ Follow these conventions when creating pull requests for Aleph repositories.
 
 ## Scope
 
-This skill only gathers information about the branch's changes and opens the PR. That's it.
+This skill works out an accurate title for the branch's changes and opens the PR with an empty skeleton body. That's it.
 
 **Do NOT:**
 
+- Write the PR description — the body is the unfilled skeleton below (issue line aside), and the human fills it in
 - Run a code review, security review, or any review skill/subagent (e.g. `/code-review`, `/security-review`, `/simplify`)
 - Run type checks, linters, formatters, builds, or tests
 - Critique the code, or fix, refactor, or otherwise modify any code
 - Block on, or wait for, any of the above
 
-Those steps run separately and are not this skill's job. Read the diff only to write an accurate title and description, then create the PR.
+Those steps run separately and are not this skill's job. Read the diff only to write an accurate title, then create the PR.
 
 ## PR Title Format (CI Enforced)
 
@@ -70,32 +71,36 @@ Multiple issues: `feat(ui): Add dashboard (APPS-1234) (APPS-567)`
 
 Multiple scopes allowed: `fix(addin, web-ui): Fix bug (CORE-1234)`
 
-## Description Rules
+## Title Wording Rules
+
+These govern the `description` part of the title, not the PR body.
 
 - Use imperative, present tense: "Add feature" not "Added feature"
 - Capitalize the first letter
 - No period at the end
 - Keep it concise and descriptive
 
-## PR Description Structure
+## PR Body: Skeleton Only
 
-The `Closes` line — not the title ID — is what moves the issue to Done on merge. The title ID alone only links the PR.
+Do not write a description. Open every PR with exactly this skeleton — headings and placeholders left unfilled, with one exception: the issue line is real.
 
 ```markdown
 ## Context
 
-Brief explanation of what the PR accomplishes and why.
+<!-- What does this PR accomplish, and why? -->
 
 ## QA
 
-1. Step-by-step testing instructions
-2. Include specific navigation paths
-3. Describe expected behavior
+<!-- Step-by-step testing instructions: navigation paths and expected behavior -->
 
 Loom:
 
-Closes <LINEAR-ISSUE>
+Closes CORE-1234
 ```
+
+Fill in the issue line with the same Linear issue(s) as the title — `Closes CORE-1234`, one line per issue, never the literal `<LINEAR-ISSUE>`. It's the line that actually moves the issue to Done (see [Issue References](#issue-references)), and it's mechanical: the ID is already in the title, so there's nothing to invent. Use `Refs`, not `Closes`, for a `-0000` placeholder.
+
+Everything else stays untouched. Don't summarize the diff, don't guess at QA steps, don't add a Loom link — a half-written description reads as finished and ships unreviewed.
 
 ## Prerequisites
 
@@ -124,39 +129,42 @@ git log $(git stack parent)..HEAD --oneline
 
 ### Step 2: Collect the Changes
 
-Read the diff of every commit that will be included, purely to understand what the PR does:
+Read the diff of every commit that will be included, purely to work out what the PR does:
 
 ```bash
 git diff $(git stack parent)...HEAD
 ```
 
-This is information gathering for the description only — don't evaluate the code, run checks, or make changes.
+This is information gathering for the title only — don't evaluate the code, run checks, or make changes.
 
-### Step 3: Write the Description
+### Step 3: Create the PR
 
-**Do include:**
-
-- Clear explanation of what and why
-- Links to relevant Linear issues
-- Context that isn't obvious from the code
-- Loom recordings for UI changes
-
-**Do NOT include:**
-
-- Redundant summaries of the diff
-- Generic testing instructions
-
-### Step 4: Create the PR
+Title: accurate, per the format above. Body: the skeleton, with only the issue line filled in.
 
 Always target the stack parent as the base branch with `--base "$(git stack parent)"`. Without an explicit `--base`, `gh pr create` targets the repository's default branch (e.g. `main`), which would break the stack.
 
 ```bash
-gh pr create --draft --base "$(git stack parent)" --title "type(scope): description (LINEAR-ISSUE)" --body "..."
+gh pr create --draft --base "$(git stack parent)" \
+  --title "fix(server): Handle null response in user endpoint (CORE-1234)" \
+  --body "$(cat <<'EOF'
+## Context
+
+<!-- What does this PR accomplish, and why? -->
+
+## QA
+
+<!-- Step-by-step testing instructions: navigation paths and expected behavior -->
+
+Loom:
+
+Closes CORE-1234
+EOF
+)"
 ```
 
 **Note:** PRs are created as drafts so humans can review before marking ready.
 
-### Step 5: Add Reviewers
+### Step 4: Add Reviewers
 
 ```bash
 gh pr edit --add-reviewer username1,username2
@@ -164,82 +172,26 @@ gh pr edit --add-reviewer username1,username2
 
 Limit to 1-3 reviewers to maintain clear ownership.
 
-## Examples
+### Step 5: Tell the User to Fill In the Description
 
-### Feature PR
+End by saying, plainly, that the PR body is an unfilled skeleton and the user needs to edit it before marking the PR ready — filling in Context, QA, and any Loom link. The issue line is already set. Print the PR URL alongside it so they can click straight through.
 
-**Title:** `feat(web-ui): Add custom label editing for chart configurations (APPS-13353)`
+## Title Examples
 
-```markdown
-## Context
+The body for each of these is the same skeleton, with its issue line matching the title's ID — only the title changes.
 
-Adds ability to customize display labels for charts. In some cases, the
-label names from the data source are not the ones we want to display.
+| Kind          | Title                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------- |
+| Feature       | `feat(web-ui): Add custom label editing for chart configurations (APPS-13353)`          |
+| Bug fix       | `fix(server): Handle null response in user endpoint (CORE-1234)`                        |
+| Simple change | `chore(deps): Update React to v18 (APPS-0000)`                                          |
+| Multi-scope   | `fix(addin, web-ui): Preserve selection across sheet switches (CORE-1234)`              |
 
-Changes:
-
-- New EditableLabel component with popover UI
-- Support for rowAliases in bar/line/waterfall charts
-- Labels preserved when switching between chart types
-
-## QA
-
-1. Navigate to any dashboard with a chart
-2. Click on a series label in the legend
-3. Edit the label text
-4. Verify label updates in legend, tooltip, and axes
-
-Loom:
-
-Closes APPS-13353
-```
-
-### Bug Fix PR
-
-**Title:** `fix(server): Handle null response in user endpoint (CORE-1234)`
-
-```markdown
-## Context
-
-The user API could return null for deleted accounts, causing a crash
-in the dashboard. Add null check before accessing user properties.
-
-## QA
-
-1. Create a test user
-2. Delete the user via admin
-3. Attempt to load dashboard that references deleted user
-4. Verify no crash occurs and appropriate fallback is shown
-
-Loom:
-
-Closes CORE-1234
-```
-
-### Simple Change PR
-
-**Title:** `chore(deps): Update React to v18 (APPS-0000)`
-
-```markdown
-## Context
-
-Updates React from v17 to v18 for performance improvements and
-new concurrent features.
-
-## QA
-
-1. Run the test suite: `pnpm run test`
-2. Start the app: `pnpm dev web-ui`
-3. Navigate through main flows and verify no regressions
-
-Loom:
-
-Refs APPS-0000
-```
-
-(`-0000` is a placeholder for "no Linear issue" — there's nothing to close, so use `Refs`, not `Closes`.)
+(`-0000` is a placeholder for "no Linear issue" — there's nothing to close, so the body gets `Refs APPS-0000`, not `Closes`.)
 
 ## Issue References
+
+The issue line is the one part of the body the skill fills in, so get it right.
 
 Every PR that resolves an issue MUST include a `Closes <ISSUE>` line in the body. The title ID alone only _links_ the PR to the issue — it does not close it, so the merge automation never fires and the issue bounces back to In Progress instead of moving to Done.
 
@@ -268,7 +220,7 @@ Keep the `Closes` line in the body regardless — it still links the PR to the i
 
 - **One PR per feature/fix** - Don't bundle unrelated changes
 - **Keep PRs reviewable** - Smaller PRs get faster, better reviews
-- **Explain the why** - Code shows what; description explains why
+- **Never write the description** - Ship the skeleton unfilled every time; only the `Closes`/`Refs` issue line is set
 - **Mark WIP early** - Use draft PRs for early feedback
-- **Include Loom** - Record UI changes for easier review
-- **Always print the PR URL** - Always pring the PR URL in your final response.
+- **Always print the PR URL** - Always print the PR URL in your final response.
+- **Always say the description needs editing** - The PR isn't done until the human fills in the skeleton
