@@ -386,7 +386,9 @@ quick() {
   local branch="${argc_branch:-}"
   local base="${argc_base:-}"
   local prompt="${argc_prompt:-}"
-  cw create --prompt "$prompt. Then commit and push. Then /create-pr-stack" --background "$branch"
+  local -a base_args=()
+  [ -n "$base" ] && base_args=(--base "$base")
+  cw create "${base_args[@]}" --prompt "$prompt. Then commit and push. Then /create-pr-stack" --background "$branch"
 }
 
 # @cmd Complete an instruction end to end, self-reviewing, pushing, and creating a PR.
@@ -399,7 +401,9 @@ full() {
   local base="${argc_base:-}"
   local prompt="${argc_prompt:-}"
   local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
-  cw create --prompt "$prompt. Then commit. Then do a /code-review $effort --fix $base . Then commit again and push. Then /create-pr-stack" --background "$branch"
+  local -a base_args=()
+  [ -n "$base" ] && base_args=(--base "$base")
+  cw create "${base_args[@]}" --prompt "$prompt. Then commit. Then do a /code-review $effort --fix . Then commit again and push. Then /create-pr-stack" --background "$branch"
 }
 
 # _parse_linear_ticket_id <ticket>
@@ -434,11 +438,16 @@ linear() {
     die "at least one linear ticket required"
   fi
 
+  # Every ticket branches off the same base, so they're siblings on top of it
+  # rather than a chain stacked on each other.
+  local -a base_args=()
+  [ -n "$base" ] && base_args=(--base "$base")
+
   for ticket in "${argc_tickets[@]}" ; do
     local ticket_id
     ticket_id="$(_parse_linear_ticket_id "$ticket")"
     branch="${USER,,}/${ticket_id,,}"
-    cw full --prompt "Assign the linear ticket $ticket_id to me, move it to 'In Progress', then complete the ticket." "$branch"
+    cw full "${base_args[@]}" --effort "$effort" --prompt "Assign the linear ticket $ticket_id to me, move it to 'In Progress', then complete the ticket." "$branch"
   done
 }
 
