@@ -18,6 +18,16 @@
   "tools": {
     "approvalMode": "auto"
   },
+  "permissions": {
+    "autoMode": {
+      "classifier": {
+        "timeouts": {
+          "stage1Ms": 30000,
+          "stage2Ms": 60000
+        }
+      }
+    }
+  },
   "context": {
     "autoCompactThreshold": 0.85,
     "fileName": ["QWEN.md", "AGENTS.md", "CLAUDE.md"]
@@ -38,6 +48,13 @@
           },
           "contextWindowSize": 119552
         },
+        "capabilities": {
+          "reasoning": {
+            "profile": "openai-effort",
+            "efforts": ["low", "medium", "xhigh"],
+            "defaultEffort": "medium"
+          }
+        },
         "wireApi": "chat-completions"
       }
     ]
@@ -51,5 +68,8 @@
     "name": "qwen/qwen3.8-27b",
     "baseUrl": "http://localhost:1234/v1"
   },
-  "privacy": { "usageStatisticsEnabled": false }
+  "privacy": {
+    "usageStatisticsEnabled": false
+  },
+  "$version": 4
 }
