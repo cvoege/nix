@@ -282,6 +282,7 @@ in
       set +h
 
       export DO_NOT_TRACK=1
+      export TEMPORAL_CONFIG_FILE="$HOME/.config/temporalio/temporal.toml"
 
       # Re-assert nix paths ahead of macOS path_helper, which /etc/profile runs on
       # every login shell and which re-prepends /usr/bin, /bin, etc. to the front of
