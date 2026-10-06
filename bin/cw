@@ -428,11 +428,10 @@ _parse_linear_ticket_id() {
 
 # @cmd Complete a linear task end to end, self-reviewing, pushing, and creating a PR.
 # @option -b --base <BRANCH>     base a new branch on this instead of trunk
-# @option -e --effort <LEVEL>    Review effort level (defaults to max)
 # @arg    tickets*                tickets to open
 linear() {
   local base="${argc_base:-}"
-  local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
+  # local effort="${argc_effort:-$DEFAULT_REVIEW_EFFORT}"
 
   if [ -z "${argc_tickets:-}" ] ; then
     die "at least one linear ticket required"
@@ -447,7 +446,7 @@ linear() {
     local ticket_id
     ticket_id="$(_parse_linear_ticket_id "$ticket")"
     branch="${USER,,}/${ticket_id,,}"
-    cw quick "${base_args[@]}" --effort "$effort" --prompt "Assign the linear ticket $ticket_id to me, move it to 'In Progress', then complete the ticket." "$branch"
+    cw quick "${base_args[@]}" --prompt "Assign the linear ticket $ticket_id to me, move it to 'In Progress', then complete the ticket." "$branch"
   done
 }
 
