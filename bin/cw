@@ -447,7 +447,7 @@ linear() {
     local ticket_id
     ticket_id="$(_parse_linear_ticket_id "$ticket")"
     branch="${USER,,}/${ticket_id,,}"
-    cw full "${base_args[@]}" --effort "$effort" --prompt "Assign the linear ticket $ticket_id to me, move it to 'In Progress', then complete the ticket." "$branch"
+    cw quick "${base_args[@]}" --effort "$effort" --prompt "Assign the linear ticket $ticket_id to me, move it to 'In Progress', then complete the ticket." "$branch"
   done
 }
 
