@@ -8,6 +8,7 @@ let
 
 
   workEmail = "colton@getaleph.com";
+  githubEmail = "6777709+cvoege@users.noreply.github.com";
   firstName = "Colton";
   lastName = "Voege";
   nameHint = "V as in Victor";
@@ -87,6 +88,7 @@ in
     pkgs.jq
     pkgs.just
     pkgs.coreutils
+    pkgs.difftastic
     pkgs.nix-direnv
     pkgs.nix-bash-completions
     pkgs.nix-index
@@ -456,7 +458,7 @@ in
     };
     settings = {
       user.name = "${firstName} ${lastName}";
-      user.email = workEmail;
+      user.email = githubEmail;
       alias = {
         co = "checkout";
         dad = "add";
@@ -482,6 +484,15 @@ in
           "!f() { git fetch origin $1 --force && git branch -f $1 origin/$1 ; }; f";
         pufl = "!git push -u origin $(git branch-name) --force-with-lease";
         shake = "remote prune origin";
+
+        dft = "-c diff.external=difft diff";
+        dlog = "-c diff.external=difft log --ext-diff -p";
+        dshow = "-c diff.external=difft show --ext-diff";
+      };
+
+      diff = {
+        colorMoved = "dimmed-zebra";
+        colorMovedWS = "allow-indentation-change";
       };
 
       color.ui = true;
