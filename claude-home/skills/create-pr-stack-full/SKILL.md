@@ -75,18 +75,18 @@ processed and pushed before their children). For each `branch` with its `parent`
         gh pr edit <branch> --base <parent>
         ```
 
-3. **Create/update the PR** by following the **`create-pr-stack-single` skill** for this single
+3. **Create/update the PR** by following the **`create-pr-stack` skill** for this single
    branch (invoke that skill — it defines the required title format, scope,
    Linear issue, and body structure). Make sure to reference the linear ticket for
    additional info on the work that was meant to be completed. If the PR already 
    exists, it should be evaluated to see if the current title and description are
    accurate. 
 
-   The create-pr-stack-single skill should be run with these stack-specific overrides:
+   The create-pr-stack skill should be run with these stack-specific overrides:
 
    - Always pass **`--base <parent>`** and **`--head <branch>`** explicitly. The
      `<parent>` is the second column from `git stack list` for this branch.
-   - Keep `--draft` (per create-pr-stack-single convention).
+   - Keep `--draft` (per create-pr-stack convention).
    - Analyze the diff for *this branch only* against its parent, not against
      trunk, so the description matches what the PR actually shows:
 
@@ -122,9 +122,9 @@ whose base, title, or body you had to correct. Then report the full output of
 
 ## Note on Linear auto-close
 
-Per the `create-pr-stack-single` skill: a `Closes <ISSUE>` line only fires when the PR targets
+Per the `create-pr-stack` skill: a `Closes <ISSUE>` line only fires when the PR targets
 the *default* branch (trunk). For every PR in the stack except the root (whose
 base is trunk), the keyword is ignored until that PR is eventually retargeted to
 trunk (after the lower PRs merge). Still include the correct `Closes`/`Refs` line
-as create-pr-stack-single specifies — it becomes effective once the base becomes trunk. Don't
+as create-pr-stack specifies — it becomes effective once the base becomes trunk. Don't
 treat the stacked PRs as broken because the issue didn't move yet.
