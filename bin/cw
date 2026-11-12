@@ -392,7 +392,7 @@ quick() {
 
 # @cmd Rebase and moniotr a PR and set it to merge when pipeline succeeds until it is merged.
 # @arg    branch!                branch to open
-# @alias start,c
+# @alias mm
 mergemonitor() {
   local branch="${argc_branch:-}"
   local base="${argc_base:-}"
