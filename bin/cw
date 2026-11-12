@@ -398,7 +398,7 @@ mergemonitor() {
   local prompt="${argc_prompt:-}"
   local -a base_args=()
   [ -n "$base" ] && base_args=(--base "$base")
-  cw create "${base_args[@]}" --prompt "Rebase this branch. Fix any conflicts that are obvious. If there are non-obvious conflicts, stop and let me know so I can deal with them. Then force push, I give you full authorization to force push this branch. Then set it to merge when ready and start a monitor to wait until the merge has fully completed and gone through the queue. If it fails due to another merge conflict, rinse and repeat the process and start a new monitor. Once it has merged, run cw close to exit this workspace. Stop and let me know if anything seems wrong." --background "$branch"
+  cw create "${base_args[@]}" --prompt "Rebase this branch. Fix any conflicts that are obvious. If there are non-obvious conflicts, stop and let me know so I can deal with them. Then force push, I give you full authorization to force push this branch. Then set it to merge when ready and start a monitor to wait until the merge has fully completed and gone through the queue. If it fails due to another merge conflict, rinse and repeat the process and start a new monitor. Once it has merged, run cw close to exit this workspace. Stop and let me know if anything seems wrong. Do this a max of 10 times before bailing out to let me deal with it." --background "$branch"
 }
 
 # @cmd Complete an instruction end to end, self-reviewing, pushing, and creating a PR.
