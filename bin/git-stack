@@ -1214,17 +1214,19 @@ cmd_diff() {
 #   trunk <- a <- b <- c   (each branch recorded via `git stack parent`)
 #
 # Run from ANY branch in the stack. restack will:
-#   1. fetch, and fast-forward each branch (and trunk) to its remote when the
-#      remote is strictly ahead (adopts review fixups pushed elsewhere);
+#   1. fetch, and fast-forward each stack branch to its remote when the remote
+#      is strictly ahead (adopts review fixups pushed elsewhere);
 #   2. rebase every branch onto its parent's new tip, bottom -> top, so each
 #      branch contributes only its own commits (no duplication even when a
-#      parent diverged, e.g. a review fixup a' landed on `a`);
+#      parent diverged, e.g. a review fixup a' landed on `a`). A branch whose
+#      parent is trunk goes onto origin/<trunk> (local trunk with --offline);
 #   2b. with --squash, collapse each branch to a single commit on its parent
 #      right after it is rebased (one commit == one PR, the cleanest stack);
 #   3. force-push (--force-with-lease) every branch in the stack;
 #   4. return you to the branch you started on.
 #
-# Trunk's history is never rewritten or force-pushed.
+# The local trunk ref is never moved: it may be checked out in another worktree,
+# and moving a ref under a worktree leaves its index on the old commit.
 #
 # State file ($GIT_DIR/stack-restack-state) format:
 #   ORIG_REF=<branch>
@@ -1233,7 +1235,8 @@ cmd_diff() {
 #   SQUASH=0|1
 #   IDX=<next plan index to process>
 #   --PLAN--
-#   <branch>\t<parent>\t<parentBaseSha>\t<branchOrigSha>
+#   <branch>\t<onto>\t<parentBaseSha>\t<branchOrigSha>
+#   (<onto> is the parent branch, or origin/<trunk> for a trunk-parented branch)
 #   ...
 # STATE and TAB are set as locals in cmd_restack; bash's dynamic scoping makes
 # them visible to the restack_* helpers it calls.
@@ -1274,7 +1277,11 @@ restack_sync_one() { # branch
   local_sha=$(sha "$b"); remote_sha=$(sha "$r")
   [[ "$local_sha" == "$remote_sha" ]] && return 0
   if is_ancestor "$b" "$r"; then
-    git update-ref "refs/heads/$b" "$remote_sha"
+    if [[ "$b" == "$(current_branch)" ]]; then
+      git merge --quiet --ff-only "$r"
+    else
+      git update-ref "refs/heads/$b" "$remote_sha"
+    fi
     info "fast-forwarded $b to origin/$b"
   elif is_ancestor "$r" "$b"; then
     return 0  # local ahead; will be pushed at the end
@@ -1323,8 +1330,12 @@ restack_build_plan() { # writes STATE; echoes nothing
   if [[ "$OFFLINE" == 0 ]]; then
     info "fetching origin..."
     git fetch --quiet origin "$trunk" "${branches[@]}" 2>/dev/null || git fetch --quiet origin || true
-    restack_sync_one "$trunk"
     local b; for b in "${branches[@]}"; do restack_sync_one "$b"; done
+  fi
+
+  local trunk_target="$trunk"
+  if [[ "$OFFLINE" == 0 ]] && git rev-parse --verify --quiet "refs/remotes/origin/$trunk" >/dev/null; then
+    trunk_target="origin/$trunk"
   fi
 
   # Snapshot parent bases + each branch's original tip (post-sync, pre-rebase).
@@ -1338,6 +1349,7 @@ restack_build_plan() { # writes STATE; echoes nothing
     local b parent base fork_base orig_sha
     for b in "${branches[@]}"; do
       parent=$(stack_parent "$b")
+      [[ "$parent" == "$trunk" ]] && parent="$trunk_target"
       # A recorded fork base (set when $b was reparented off a removed branch)
       # overrides the parent's tip: it's the true point to replay $b's commits
       # from. Otherwise the parent's current tip is the fork point, as usual.
@@ -1441,6 +1453,7 @@ restack_do_continue() {
 restack_do_abort() {
   [[ -f "$STATE" ]] || die "no restack in progress."
   rebase_in_progress && git rebase --abort || true
+  git checkout --quiet --detach
   local line b _p _base orig
   while IFS= read -r line; do
     IFS="$TAB" read -r b _p _base orig <<<"$line"
