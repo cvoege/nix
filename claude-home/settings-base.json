@@ -1,7 +1,11 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
-    "defaultMode": "auto"
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(cw close *)",
+      "Bash(cw close)"
+    ]
   },
   "model": "opus[1m]",
   "hooks": {
