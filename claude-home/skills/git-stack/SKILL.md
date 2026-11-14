@@ -127,6 +127,17 @@ gh pr edit <branch> --base <new-parent>
 
 Then confirm with `git stack prs list` that each PR's base matches its parent.
 
+### push / pufl — publish the stack
+
+```bash
+git stack push [<git push flags>…]   # plain push of every branch in the stack
+git stack pufl [<git push flags>…]   # same, --force-with-lease
+```
+
+Pushes every branch in the current stack to origin in one `git push -u`, from
+any branch in it. Use `pufl` after a `restack --no-push`/`sync --no-push` once
+the user is ready to publish. Flags such as `--dry-run` pass through to `git push`.
+
 ### collapse — fold branches together
 
 ```bash

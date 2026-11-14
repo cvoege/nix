@@ -42,6 +42,10 @@
 #                                   their children) then restack the remainder
 #   git stack sync-all              run sync on every tracked stack (each tree on
 #                                   trunk), one after another
+#   git stack push                  push every branch in the current stack to
+#                                   origin in one push, setting upstreams; other
+#                                   flags (e.g. --dry-run) go to `git push`
+#   git stack pufl                  same, with --force-with-lease
 #   git stack trunk [<branch>]      show, or set, the trunk (default: origin HEAD)
 
 set -euo pipefail
@@ -1659,6 +1663,38 @@ cmd_sync() {
   cmd_restack ${rargs[@]+"${rargs[@]}"}
 }
 
+cmd_push() { # force(0|1) [git push flags…]
+  local force="$1"; shift
+  local -a opts=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) echo "usage: git stack $([[ $force -eq 1 ]] && echo pufl || echo push) [<git push flags>…]"; return 0 ;;
+      -*) opts+=("$1") ;;
+      *) die "unexpected argument: '$1' (pushes the whole current stack; flags go to git push)" ;;
+    esac
+    shift
+  done
+
+  local cur trunk
+  cur=$(current_branch)
+  [[ -n "$cur" ]] || die "detached HEAD; checkout a stack branch first."
+  trunk=$(stack_trunk)
+  [[ "$cur" != "$trunk" ]] || die "you're on trunk ('$trunk'); checkout a stack branch first."
+
+  local -a branches=()
+  local b
+  while IFS= read -r b; do
+    [[ -z "$b" ]] && continue
+    stack_check_err "$b"
+    branches+=("$b")
+  done < <(stack_collect "$cur" || true)
+  [[ ${#branches[@]} -gt 0 ]] || die "'$cur' is not part of a tracked stack."
+
+  [[ $force -eq 1 ]] && opts+=(--force-with-lease)
+  info "pushing ${#branches[@]} branch(es)$([[ $force -eq 1 ]] && echo ' (--force-with-lease)'): ${branches[*]}"
+  git push -u ${opts[@]+"${opts[@]}"} origin "${branches[@]}"
+}
+
 # Run `git stack sync` on every tracked stack (each tree rooted on trunk), one
 # after another. Collects all stack roots up front, then for each checks that
 # stack out and syncs it (drop merged branches, restack the rest). Stacks are
@@ -1721,7 +1757,7 @@ sub="${1:-show}"; [[ $# -gt 0 ]] && shift || true
 # stack_parent serves without building the table at all. Adding a traversing
 # subcommand without listing it here costs speed, never correctness.
 case "$sub" in
-  show|""|list-stacks|all|prs|review|list|checkout|co|collapse|restack|sync|sync-all|remove|infer)
+  show|""|list-stacks|all|prs|review|list|checkout|co|collapse|restack|sync|sync-all|remove|infer|push|pufl)
     stack_load_parents ;;
 esac
 case "$sub" in
@@ -1745,6 +1781,8 @@ case "$sub" in
   restack)        cmd_restack "$@" ;;
   sync)           cmd_sync "$@" ;;
   sync-all)       cmd_sync_all "$@" ;;
+  push)           cmd_push 0 "$@" ;;
+  pufl)           cmd_push 1 "$@" ;;
   trunk)          cmd_trunk "$@" ;;
   -h|--help|help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d' ;;
   *) die "unknown subcommand: '$sub' (try: git stack --help)" ;;
